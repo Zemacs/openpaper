@@ -104,31 +104,26 @@ def retry_llm_operation(max_retries: int = 3, delay: float = 1.0):
 def find_offsets(target: str, full_text: str) -> Tuple[int, int]:
     """
     Find the start and end offsets of a target string within a full text.
-    Returns a tuple of (start_offset, end_offset).
+    Returns a tuple of (start_offset, end_offset), or (-1, -1) if not found.
     """
     if not target or not full_text:
         return -1, -1
 
+    # Try exact match first
     start_offset = full_text.find(target)
-    if start_offset == -1:
-        # Run a fuzzy search if exact match not found
-        matcher = difflib.SequenceMatcher(None, full_text, target)
-        match = matcher.find_longest_match(0, len(full_text), 0, len(target))
-        if match.size == 0:
-            return -1, -1  # No match found
+    if start_offset != -1:
+        return start_offset, start_offset + len(target)
 
-        # Guardrail: reject weak partial matches to avoid pinning highlights
-        # to unrelated short snippets (commonly in title/abstract area).
-        min_match_len = min(len(target), max(20, int(len(target) * 0.6)))
-        if match.size < min_match_len:
-            return -1, -1
-
-        start_offset = match.a  # Start index of the match in full_text
-        end_offset = start_offset + match.size
-        return start_offset, end_offset
-
-    if start_offset == -1:
+    # Fall back to fuzzy search
+    matcher = difflib.SequenceMatcher(None, full_text, target)
+    match = matcher.find_longest_match(0, len(full_text), 0, len(target))
+    if match.size == 0:
         return -1, -1
 
-    end_offset = start_offset + len(target)
-    return start_offset, end_offset
+    # Reject weak partial matches to avoid pinning highlights
+    # to unrelated short snippets (commonly in title/abstract area).
+    min_match_len = min(len(target), max(20, int(len(target) * 0.6)))
+    if match.size < min_match_len:
+        return -1, -1
+
+    return match.a, match.a + match.size
