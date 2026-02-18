@@ -94,20 +94,33 @@ def _get_or_create_dev_user(db: Session) -> CurrentUser:
     # Find or create RESEARCHER subscription
     subscription = subscription_crud.get_by_user_id(db, db_user.id)
     if not subscription:
-        subscription = subscription_crud.create(
-            db,
-            obj_in=SubscriptionCreate(
-                user_id=db_user.id,
-                status=SubscriptionStatus.ACTIVE.value,
-                current_period_start=datetime(2020, 1, 1, tzinfo=timezone.utc),
-                current_period_end=datetime(2099, 12, 31, tzinfo=timezone.utc),
-            ),
-        )
-        # Set plan to RESEARCHER (not in SubscriptionCreate schema)
-        subscription.plan = SubscriptionPlan.RESEARCHER.value  # type: ignore
-        db.commit()
-        db.refresh(subscription)
-        logger.info(f"Created RESEARCHER subscription for dev user: {DEV_USER_EMAIL}")
+        try:
+            subscription = subscription_crud.create(
+                db,
+                obj_in=SubscriptionCreate(
+                    user_id=db_user.id,
+                    status=SubscriptionStatus.ACTIVE.value,
+                    current_period_start=datetime(2020, 1, 1, tzinfo=timezone.utc),
+                    current_period_end=datetime(2099, 12, 31, tzinfo=timezone.utc),
+                ),
+            )
+        except Exception:
+            db.rollback()
+            subscription = subscription_crud.get_by_user_id(db, db_user.id)
+
+        if not subscription:
+            # create returned None (base_crud caught the error) — re-fetch
+            db.rollback()
+            subscription = subscription_crud.get_by_user_id(db, db_user.id)
+
+        if not subscription:
+            raise RuntimeError(f"Failed to create or find subscription for dev user {DEV_USER_EMAIL}")
+
+        if str(subscription.plan) != SubscriptionPlan.RESEARCHER.value:
+            subscription.plan = SubscriptionPlan.RESEARCHER.value  # type: ignore
+            db.commit()
+            db.refresh(subscription)
+        logger.info(f"Ensured RESEARCHER subscription for dev user: {DEV_USER_EMAIL}")
 
     # Ensure subscription is active RESEARCHER
     needs_update = False
