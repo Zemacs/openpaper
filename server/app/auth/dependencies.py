@@ -1,5 +1,6 @@
 import logging
 import os
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Annotated, Optional
@@ -24,9 +25,32 @@ SESSION_COOKIE_NAME = "session_token"
 # Setup header auth
 api_key_header = APIKeyHeader(name="Authorization", auto_error=False)
 
-# Dev auto-login configuration — only effective when DEBUG is also enabled
-_DEBUG = os.getenv("DEBUG", "false").lower() in ("true", "1", "t")
-DEV_AUTO_LOGIN = _DEBUG and os.getenv("DEV_AUTO_LOGIN", "false").lower() == "true"
+# ---------------------------------------------------------------------------
+# Dev auto-login: skip OAuth/email auth and use a local dev account.
+#
+# Activate by setting DEV_AUTO_LOGIN=true in .env.
+# As a safety net, it is forcibly disabled when ENV=production so that a
+# stray env var cannot bypass authentication in a real deployment.
+# ---------------------------------------------------------------------------
+_ENV = os.getenv("ENV", "").lower()
+_dev_auto_login_requested = os.getenv("DEV_AUTO_LOGIN", "false").lower() == "true"
+
+if _dev_auto_login_requested and _ENV == "production":
+    logger.error(
+        "DEV_AUTO_LOGIN=true is set but ENV=production — "
+        "auto-login has been DISABLED for security. "
+        "Remove DEV_AUTO_LOGIN from your production config."
+    )
+    DEV_AUTO_LOGIN = False
+else:
+    DEV_AUTO_LOGIN = _dev_auto_login_requested
+
+if DEV_AUTO_LOGIN:
+    logger.warning(
+        "⚠ DEV_AUTO_LOGIN is ENABLED — all requests will be authenticated "
+        "as the dev user. Do NOT use this in production."
+    )
+
 DEV_USER_EMAIL = os.getenv("DEV_USER_EMAIL", "dev@localhost")
 DEV_USER_NAME = os.getenv("DEV_USER_NAME", "Dev User")
 
@@ -39,7 +63,6 @@ _DEV_CACHE_TTL_SECONDS = 300  # 5 minutes
 def _get_or_create_dev_user(db: Session) -> CurrentUser:
     """Get or create a dev user with admin privileges and RESEARCHER subscription."""
     global _dev_user_cache, _dev_user_cache_ts
-    import time
 
     now = time.monotonic()
     if _dev_user_cache is not None and (now - _dev_user_cache_ts) < _DEV_CACHE_TTL_SECONDS:
