@@ -24,19 +24,25 @@ SESSION_COOKIE_NAME = "session_token"
 # Setup header auth
 api_key_header = APIKeyHeader(name="Authorization", auto_error=False)
 
-# Dev auto-login configuration
-DEV_AUTO_LOGIN = os.getenv("DEV_AUTO_LOGIN", "false").lower() == "true"
-DEV_USER_EMAIL = os.getenv("DEV_USER_EMAIL", "chaihaishui@gmail.com")
-DEV_USER_NAME = os.getenv("DEV_USER_NAME", "luffy")
+# Dev auto-login configuration — only effective when DEBUG is also enabled
+_DEBUG = os.getenv("DEBUG", "false").lower() in ("true", "1", "t")
+DEV_AUTO_LOGIN = _DEBUG and os.getenv("DEV_AUTO_LOGIN", "false").lower() == "true"
+DEV_USER_EMAIL = os.getenv("DEV_USER_EMAIL", "dev@localhost")
+DEV_USER_NAME = os.getenv("DEV_USER_NAME", "Dev User")
 
-# Cache dev user to avoid DB lookups on every request
+# Cache dev user with TTL to avoid DB lookups on every request
 _dev_user_cache: Optional[CurrentUser] = None
+_dev_user_cache_ts: float = 0.0
+_DEV_CACHE_TTL_SECONDS = 300  # 5 minutes
 
 
 def _get_or_create_dev_user(db: Session) -> CurrentUser:
     """Get or create a dev user with admin privileges and RESEARCHER subscription."""
-    global _dev_user_cache
-    if _dev_user_cache is not None:
+    global _dev_user_cache, _dev_user_cache_ts
+    import time
+
+    now = time.monotonic()
+    if _dev_user_cache is not None and (now - _dev_user_cache_ts) < _DEV_CACHE_TTL_SECONDS:
         return _dev_user_cache
 
     # Find or create user
@@ -99,6 +105,7 @@ def _get_or_create_dev_user(db: Session) -> CurrentUser:
         is_active=True,
     )
     _dev_user_cache = dev_user
+    _dev_user_cache_ts = time.monotonic()
     return dev_user
 
 
