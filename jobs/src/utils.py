@@ -35,12 +35,12 @@ async def time_it(
         duration = end_time - start_time
         logger.info(f"Finished: {description}. Duration: {duration:.2f} seconds")
 
-    if job_id:
-        event_name = f"timer:{description.lower().replace(' ', '_')}"
-        properties = {"duration": duration}
-        if event_properties:
-            properties.update(event_properties)
-        track_event(event_name, distinct_id=job_id, properties=properties)
+        if job_id:
+            event_name = f"timer:{description.lower().replace(' ', '_')}"
+            properties: Dict[str, Any] = {"duration": duration}
+            if event_properties:
+                properties.update(event_properties)
+            track_event(event_name, distinct_id=job_id, properties=properties)
 
 
 
