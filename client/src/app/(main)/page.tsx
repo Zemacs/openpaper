@@ -283,16 +283,22 @@ export default function Home() {
 		const fetchData = async () => {
 			setIsLoadingData(true);
 			try {
-				const [papersResponse, projectsResponse] = await Promise.all([
+				const [papersResult, projectsResult] = await Promise.allSettled([
 					fetchFromApi("/api/paper/relevant"),
 					fetchFromApi("/api/projects?detailed=true")
 				]);
-				setRelevantPapers(papersResponse?.papers || []);
-				setProjects(projectsResponse || []);
-			} catch (error) {
-				console.error("Error fetching data:", error);
-				setRelevantPapers([]);
-				setProjects([]);
+				setRelevantPapers(
+					papersResult.status === "fulfilled" ? papersResult.value?.papers || [] : []
+				);
+				setProjects(
+					projectsResult.status === "fulfilled" ? projectsResult.value || [] : []
+				);
+				if (papersResult.status === "rejected") {
+					console.error("Error fetching papers:", papersResult.reason);
+				}
+				if (projectsResult.status === "rejected") {
+					console.error("Error fetching projects:", projectsResult.reason);
+				}
 			} finally {
 				setIsLoadingData(false);
 			}
@@ -303,16 +309,16 @@ export default function Home() {
 
 	const refreshData = async () => {
 		if (!user) return;
-		try {
-			const [papersResponse, projectsResponse] = await Promise.all([
-				fetchFromApi("/api/paper/relevant"),
-				fetchFromApi("/api/projects?detailed=true")
-			]);
-			setRelevantPapers(papersResponse?.papers || []);
-			setProjects(projectsResponse || []);
-		} catch (error) {
-			console.error("Error refreshing data:", error);
-		}
+		const [papersResult, projectsResult] = await Promise.allSettled([
+			fetchFromApi("/api/paper/relevant"),
+			fetchFromApi("/api/projects?detailed=true")
+		]);
+		setRelevantPapers(
+			papersResult.status === "fulfilled" ? papersResult.value?.papers || [] : []
+		);
+		setProjects(
+			projectsResult.status === "fulfilled" ? projectsResult.value || [] : []
+		);
 	};
 
 	// Handle file upload with custom loading experience

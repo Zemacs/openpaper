@@ -249,10 +249,6 @@ async def get_relevant_papers(
     Get the most relevant papers uploaded by the user
     """
     papers: List[Paper] = paper_crud.get_top_relevant_papers(db, user=current_user)
-    if not papers:
-        return JSONResponse(
-            status_code=404, content={"message": "No relevant papers found"}
-        )
 
     return JSONResponse(
         status_code=200,
