@@ -1,14 +1,20 @@
 import logging
+import os
 import uuid
+from datetime import datetime, timezone
 from typing import Annotated, Optional
 
-from app.database.crud.subscription_crud import subscription_crud
+from app.database.crud.subscription_crud import SubscriptionCreate, subscription_crud
 from app.database.crud.user_crud import user as user_crud
 from app.database.database import get_db
+from app.database.models import SubscriptionPlan, SubscriptionStatus
 from app.schemas.user import CurrentUser
+from dotenv import load_dotenv
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import APIKeyHeader
 from sqlalchemy.orm import Session
+
+load_dotenv()
 
 logger = logging.getLogger(__name__)
 
@@ -17,6 +23,83 @@ SESSION_COOKIE_NAME = "session_token"
 
 # Setup header auth
 api_key_header = APIKeyHeader(name="Authorization", auto_error=False)
+
+# Dev auto-login configuration
+DEV_AUTO_LOGIN = os.getenv("DEV_AUTO_LOGIN", "false").lower() == "true"
+DEV_USER_EMAIL = os.getenv("DEV_USER_EMAIL", "chaihaishui@gmail.com")
+DEV_USER_NAME = os.getenv("DEV_USER_NAME", "luffy")
+
+# Cache dev user to avoid DB lookups on every request
+_dev_user_cache: Optional[CurrentUser] = None
+
+
+def _get_or_create_dev_user(db: Session) -> CurrentUser:
+    """Get or create a dev user with admin privileges and RESEARCHER subscription."""
+    global _dev_user_cache
+    if _dev_user_cache is not None:
+        return _dev_user_cache
+
+    # Find or create user
+    db_user = user_crud.get_by_email(db, email=DEV_USER_EMAIL)
+    if not db_user:
+        db_user = user_crud.create_email_user(db, email=DEV_USER_EMAIL, name=DEV_USER_NAME)
+        db_user.is_admin = True  # type: ignore
+        db_user.is_email_verified = True  # type: ignore
+        db.commit()
+        db.refresh(db_user)
+        logger.info(f"Created dev user: {DEV_USER_EMAIL}")
+
+    # Ensure admin + verified
+    if not db_user.is_admin or not db_user.is_email_verified:
+        db_user.is_admin = True  # type: ignore
+        db_user.is_email_verified = True  # type: ignore
+        db.commit()
+        db.refresh(db_user)
+
+    # Find or create RESEARCHER subscription
+    subscription = subscription_crud.get_by_user_id(db, db_user.id)
+    if not subscription:
+        subscription = subscription_crud.create(
+            db,
+            obj_in=SubscriptionCreate(
+                user_id=db_user.id,
+                status=SubscriptionStatus.ACTIVE.value,
+                current_period_start=datetime(2020, 1, 1, tzinfo=timezone.utc),
+                current_period_end=datetime(2099, 12, 31, tzinfo=timezone.utc),
+            ),
+        )
+        # Set plan to RESEARCHER (not in SubscriptionCreate schema)
+        subscription.plan = SubscriptionPlan.RESEARCHER.value  # type: ignore
+        db.commit()
+        db.refresh(subscription)
+        logger.info(f"Created RESEARCHER subscription for dev user: {DEV_USER_EMAIL}")
+
+    # Ensure subscription is active RESEARCHER
+    needs_update = False
+    if str(subscription.plan) != SubscriptionPlan.RESEARCHER.value:
+        subscription.plan = SubscriptionPlan.RESEARCHER.value  # type: ignore
+        needs_update = True
+    if str(subscription.status) != SubscriptionStatus.ACTIVE.value:
+        subscription.status = SubscriptionStatus.ACTIVE.value  # type: ignore
+        needs_update = True
+    if not subscription.current_period_end or subscription.current_period_end < datetime.now(timezone.utc):
+        subscription.current_period_end = datetime(2099, 12, 31, tzinfo=timezone.utc)  # type: ignore
+        needs_update = True
+    if needs_update:
+        db.commit()
+        db.refresh(subscription)
+
+    dev_user = CurrentUser(
+        id=uuid.UUID(str(db_user.id)),
+        email=str(db_user.email),
+        name=str(db_user.name),
+        is_admin=True,
+        picture=str(db_user.picture) if db_user.picture else None,
+        is_email_verified=True,
+        is_active=True,
+    )
+    _dev_user_cache = dev_user
+    return dev_user
 
 
 def get_current_user(
@@ -29,6 +112,10 @@ def get_current_user(
 
     This is a FastAPI dependency that can be used in route functions.
     """
+    # Dev auto-login: skip auth, return dev user directly
+    if DEV_AUTO_LOGIN:
+        return _get_or_create_dev_user(db)
+
     token = None
 
     # First try from Authorization header
