@@ -57,7 +57,34 @@ export interface RenderedHighlightPosition {
   page: number;
 }
 
+function normalizeSelectionText(text: string): string {
+  return text.replace(/\s+/g, " ").trim();
+}
+
+function getDomSelectionKey(range: Range, text: string): string {
+  const rect = range.getBoundingClientRect();
+  const pageNumber =
+    (range.startContainer instanceof Element
+      ? range.startContainer
+      : range.startContainer.parentElement
+    )
+      ?.closest?.(".page[data-page-number]")
+      ?.getAttribute("data-page-number") || "";
+
+  return [
+    text,
+    pageNumber,
+    Math.round(rect.left),
+    Math.round(rect.top),
+    Math.round(rect.width),
+    Math.round(rect.height),
+    range.startOffset,
+    range.endOffset,
+  ].join("|");
+}
+
 export interface PdfHighlighterViewerProps {
+  paperId?: string;
   pdfUrl: string;
   explicitSearchTerm?: string;
   highlights: PaperHighlight[];
@@ -92,6 +119,7 @@ export interface PdfHighlighterViewerProps {
 
 export function PdfHighlighterViewer(props: PdfHighlighterViewerProps) {
   const {
+    paperId,
     pdfUrl,
     explicitSearchTerm,
     highlights,
@@ -134,6 +162,210 @@ export function PdfHighlighterViewer(props: PdfHighlighterViewerProps) {
   const [showScrollToTop] = useState(false);
   const [pdfReady, setPdfReady] = useState(false);
   const [highlightColor, setHighlightColor] = useState<HighlightColor>("blue");
+  const [selectedPageNumber, setSelectedPageNumber] = useState<number | null>(null);
+  const [selectedContextBefore, setSelectedContextBefore] = useState<string | null>(null);
+  const [selectedContextAfter, setSelectedContextAfter] = useState<string | null>(null);
+  const lastPointerRef = useRef<{ x: number; y: number; ts: number } | null>(null);
+  const isPointerSelectingRef = useRef(false);
+  const lastAppliedDomSelectionKeyRef = useRef<string | null>(null);
+  const [isSelectionInProgress, setIsSelectionInProgress] = useState(false);
+  const selectionProgressTimeoutRef = useRef<number | null>(null);
+
+  const clearSelectionProgressTimeout = useCallback(() => {
+    if (selectionProgressTimeoutRef.current !== null) {
+      window.clearTimeout(selectionProgressTimeoutRef.current);
+      selectionProgressTimeoutRef.current = null;
+    }
+  }, []);
+
+  const markSelectionCompleted = useCallback(() => {
+    clearSelectionProgressTimeout();
+    if (isPointerSelectingRef.current) {
+      isPointerSelectingRef.current = false;
+    }
+    setIsSelectionInProgress(false);
+  }, [clearSelectionProgressTimeout]);
+
+  const markSelectionStarted = useCallback(() => {
+    clearSelectionProgressTimeout();
+    isPointerSelectingRef.current = true;
+    setIsSelectionInProgress(true);
+    // Safety fallback: avoid getting stuck if pointerup is lost.
+    selectionProgressTimeoutRef.current = window.setTimeout(() => {
+      markSelectionCompleted();
+    }, 2500);
+  }, [clearSelectionProgressTimeout, markSelectionCompleted]);
+
+  useEffect(() => {
+    if (!selectedText) {
+      lastAppliedDomSelectionKeyRef.current = null;
+      setSelectedPageNumber(null);
+      setSelectedContextBefore(null);
+      setSelectedContextAfter(null);
+    }
+  }, [selectedText]);
+
+  const extractSelectionContext = useCallback((range: Range) => {
+    const maxChars = 220;
+    const normalizeSlice = (text: string, fromEnd: boolean) => {
+      const normalized = text.replace(/\s+/g, " ").trim();
+      if (!normalized) return "";
+      return fromEnd
+        ? normalized.slice(Math.max(0, normalized.length - maxChars))
+        : normalized.slice(0, maxChars);
+    };
+
+    const boundaryText = (
+      container: Node,
+      offset: number,
+      takeBefore: boolean,
+    ): string => {
+      if (container.nodeType === Node.TEXT_NODE) {
+        const text = container.textContent || "";
+        if (takeBefore) {
+          return text.slice(0, Math.max(0, Math.min(offset, text.length)));
+        }
+        return text.slice(Math.max(0, Math.min(offset, text.length)));
+      }
+
+      const children = Array.from(container.childNodes);
+      if (takeBefore) {
+        return children
+          .slice(0, Math.max(0, Math.min(offset, children.length)))
+          .map((node) => node.textContent || "")
+          .join(" ");
+      }
+      return children
+        .slice(Math.max(0, Math.min(offset, children.length)))
+        .map((node) => node.textContent || "")
+        .join(" ");
+    };
+
+    const before = normalizeSlice(
+      boundaryText(range.startContainer, range.startOffset, true),
+      true,
+    );
+    const after = normalizeSlice(
+      boundaryText(range.endContainer, range.endOffset, false),
+      false,
+    );
+    return { before, after };
+  }, []);
+
+  const applyDomSelection = useCallback(
+    (fallbackPoint?: { x: number; y: number }) => {
+      const container = containerRef.current;
+      const domSelection = window.getSelection();
+      if (!container || !domSelection || domSelection.rangeCount === 0) {
+        return false;
+      }
+
+      const selected = domSelection.toString().replace(/\s+/g, " ").trim();
+      const normalizedSelected = normalizeSelectionText(selected);
+      if (!normalizedSelected) {
+        return false;
+      }
+
+      const range = domSelection.getRangeAt(0);
+      const selectionKey = getDomSelectionKey(range, normalizedSelected);
+      const isNodeInsideContainer = (node: Node | null) => {
+        if (!node) return false;
+        if (container.contains(node)) return true;
+        if (node instanceof Element) {
+          return Boolean(node.closest("#pdf-container"));
+        }
+        return Boolean(node.parentElement?.closest("#pdf-container"));
+      };
+      if (
+        !isNodeInsideContainer(range.commonAncestorContainer) &&
+        !isNodeInsideContainer(range.startContainer) &&
+        !isNodeInsideContainer(range.endContainer)
+      ) {
+        return false;
+      }
+
+      if (
+        tooltipPosition &&
+        selectedText === normalizedSelected &&
+        lastAppliedDomSelectionKeyRef.current === selectionKey
+      ) {
+        markSelectionCompleted();
+        return true;
+      }
+
+      setIsHighlightInteraction(false);
+      if (selectedText !== normalizedSelected) {
+        setSelectedText(normalizedSelected);
+      }
+
+      const rect = range.getBoundingClientRect();
+      const recentPointer = lastPointerRef.current;
+      const hasRecentPointer =
+        recentPointer && Date.now() - recentPointer.ts < 2000;
+      const pointerX = fallbackPoint?.x ?? (hasRecentPointer ? recentPointer.x : undefined);
+      const pointerY = fallbackPoint?.y ?? (hasRecentPointer ? recentPointer.y : undefined);
+      const rectHasGeometry =
+        Number.isFinite(rect.left) &&
+        Number.isFinite(rect.top) &&
+        Number.isFinite(rect.width) &&
+        Number.isFinite(rect.height) &&
+        rect.width > 0 &&
+        rect.height > 0;
+      const x =
+        rectHasGeometry
+          ? rect.left + rect.width / 2
+          : typeof pointerX === "number"
+            ? pointerX
+            : rect.right > 0
+              ? rect.right
+              : 24;
+      const y =
+        rectHasGeometry
+          ? rect.bottom
+          : typeof pointerY === "number"
+            ? pointerY
+            : rect.top + rect.height / 2 > 0
+              ? rect.top + rect.height / 2
+            : 24;
+      if (
+        !tooltipPosition ||
+        Math.abs(tooltipPosition.x - x) > 2 ||
+        Math.abs(tooltipPosition.y - y) > 2
+      ) {
+        setTooltipPosition({ x, y });
+      }
+
+      const pageEl = (range.startContainer instanceof Element
+        ? range.startContainer
+        : range.startContainer.parentElement
+      )?.closest?.(".page[data-page-number]");
+      const pageAttr = pageEl?.getAttribute("data-page-number");
+      setSelectedPageNumber(pageAttr ? parseInt(pageAttr, 10) : null);
+
+      try {
+        const { before, after } = extractSelectionContext(range);
+        setSelectedContextBefore(before || null);
+        setSelectedContextAfter(after || null);
+      } catch (error) {
+        console.warn("Failed to extract selection context from DOM fallback:", error);
+        setSelectedContextBefore(null);
+        setSelectedContextAfter(null);
+      }
+
+      lastAppliedDomSelectionKeyRef.current = selectionKey;
+      markSelectionCompleted();
+      return true;
+    },
+    [
+      extractSelectionContext,
+      markSelectionCompleted,
+      selectedText,
+      tooltipPosition,
+      setIsHighlightInteraction,
+      setSelectedText,
+      setTooltipPosition,
+    ],
+  );
 
   // Search hook
   const search = usePdfSearch({
@@ -239,19 +471,179 @@ export function PdfHighlighterViewer(props: PdfHighlighterViewerProps) {
       setCurrentSelection(selection);
       setSelectedText(selection.content.text || "");
       setIsHighlightInteraction(false);
+      markSelectionCompleted();
+
+      try {
+        const ghostHighlight = selection.makeGhostHighlight();
+        setSelectedPageNumber(ghostHighlight.position.boundingRect.pageNumber);
+      } catch (error) {
+        // Keep selection menu functional even if page extraction fails on edge PDFs.
+        console.warn("Failed to derive selected page number from ghost highlight:", error);
+        setSelectedPageNumber(null);
+      }
 
       const domSelection = window.getSelection();
       if (domSelection && domSelection.rangeCount > 0) {
         const range = domSelection.getRangeAt(0);
+        const normalizedDomSelection = normalizeSelectionText(domSelection.toString());
+        if (normalizedDomSelection) {
+          lastAppliedDomSelectionKeyRef.current = getDomSelectionKey(
+            range,
+            normalizedDomSelection,
+          );
+        }
         const rect = range.getBoundingClientRect();
+        const rectHasGeometry =
+          Number.isFinite(rect.left) &&
+          Number.isFinite(rect.top) &&
+          Number.isFinite(rect.width) &&
+          Number.isFinite(rect.height) &&
+          rect.width > 0 &&
+          rect.height > 0;
         setTooltipPosition({
-          x: rect.right,
-          y: rect.top + rect.height / 2,
+          x: rectHasGeometry ? rect.left + rect.width / 2 : rect.right,
+          y: rectHasGeometry ? rect.bottom : rect.top + rect.height / 2,
         });
+        try {
+          const { before, after } = extractSelectionContext(range);
+          setSelectedContextBefore(before || null);
+          setSelectedContextAfter(after || null);
+        } catch (error) {
+          // Context extraction should be best-effort and must not block the menu.
+          console.warn("Failed to extract selection context:", error);
+          setSelectedContextBefore(null);
+          setSelectedContextAfter(null);
+        }
+      } else {
+        lastAppliedDomSelectionKeyRef.current = null;
+        setSelectedContextBefore(null);
+        setSelectedContextAfter(null);
       }
     },
-    [setSelectedText, setTooltipPosition, setIsHighlightInteraction],
+    [extractSelectionContext, markSelectionCompleted, setSelectedText, setTooltipPosition, setIsHighlightInteraction],
   );
+
+  // Fallback for browsers / edge interactions where PdfHighlighter's onSelection does not fire.
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+
+    const onPointerDown = (event: PointerEvent) => {
+      markSelectionStarted();
+      lastPointerRef.current = { x: event.clientX, y: event.clientY, ts: Date.now() };
+    };
+
+    const onMouseUp = (event: MouseEvent) => {
+      markSelectionCompleted();
+      lastPointerRef.current = { x: event.clientX, y: event.clientY, ts: Date.now() };
+      const appliedImmediately = applyDomSelection({
+        x: event.clientX,
+        y: event.clientY,
+      });
+      if (!appliedImmediately) {
+        setTimeout(() => {
+          void applyDomSelection({ x: event.clientX, y: event.clientY });
+        }, 0);
+      }
+    };
+
+    const onContextMenu = (event: MouseEvent) => {
+      markSelectionCompleted();
+      lastPointerRef.current = { x: event.clientX, y: event.clientY, ts: Date.now() };
+      const appliedImmediately = applyDomSelection({
+        x: event.clientX,
+        y: event.clientY,
+      });
+      if (!appliedImmediately) {
+        setTimeout(() => {
+          void applyDomSelection({ x: event.clientX, y: event.clientY });
+        }, 0);
+      }
+    };
+
+    const onPointerCancel = () => {
+      markSelectionCompleted();
+    };
+
+    const onDocumentPointerUp = (event: PointerEvent) => {
+      const wasSelecting = isPointerSelectingRef.current;
+      markSelectionCompleted();
+      if (!wasSelecting) {
+        return;
+      }
+      const appliedImmediately = applyDomSelection({
+        x: event.clientX,
+        y: event.clientY,
+      });
+      if (!appliedImmediately) {
+        setTimeout(() => {
+          void applyDomSelection({ x: event.clientX, y: event.clientY });
+        }, 0);
+      }
+    };
+
+    const onWindowBlur = () => {
+      markSelectionCompleted();
+    };
+
+    const onVisibilityChange = () => {
+      if (document.visibilityState !== "visible") {
+        markSelectionCompleted();
+      }
+    };
+
+    container.addEventListener("pointerdown", onPointerDown, true);
+    container.addEventListener("mouseup", onMouseUp, true);
+    container.addEventListener("contextmenu", onContextMenu, true);
+    document.addEventListener("pointerup", onDocumentPointerUp, true);
+    document.addEventListener("pointercancel", onPointerCancel, true);
+    window.addEventListener("blur", onWindowBlur);
+    document.addEventListener("visibilitychange", onVisibilityChange);
+
+    return () => {
+      clearSelectionProgressTimeout();
+      container.removeEventListener("pointerdown", onPointerDown, true);
+      container.removeEventListener("mouseup", onMouseUp, true);
+      container.removeEventListener("contextmenu", onContextMenu, true);
+      document.removeEventListener("pointerup", onDocumentPointerUp, true);
+      document.removeEventListener("pointercancel", onPointerCancel, true);
+      window.removeEventListener("blur", onWindowBlur);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+  }, [applyDomSelection, clearSelectionProgressTimeout, markSelectionCompleted, markSelectionStarted]);
+
+  // Additional fallback: some browsers/plugins skip mouseup callbacks but still emit selectionchange.
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+
+    let rafId: number | null = null;
+
+    const onSelectionChange = () => {
+      if (isPointerSelectingRef.current) {
+        return;
+      }
+      if (rafId !== null) {
+        cancelAnimationFrame(rafId);
+      }
+      rafId = requestAnimationFrame(() => {
+        rafId = null;
+        const domSelection = window.getSelection();
+        if (!domSelection || domSelection.rangeCount === 0 || domSelection.isCollapsed) {
+          return;
+        }
+        void applyDomSelection();
+      });
+    };
+
+    document.addEventListener("selectionchange", onSelectionChange);
+    return () => {
+      if (rafId !== null) {
+        cancelAnimationFrame(rafId);
+      }
+      document.removeEventListener("selectionchange", onSelectionChange);
+    };
+  }, [applyDomSelection]);
 
   // Handle ghost highlight creation
   const handleCreateGhostHighlight = useCallback(
@@ -286,6 +678,9 @@ export function PdfHighlighterViewer(props: PdfHighlighterViewerProps) {
         setCurrentSelection(null);
         setSelectedText("");
         setTooltipPosition(null);
+        setSelectedPageNumber(null);
+        setSelectedContextBefore(null);
+        setSelectedContextAfter(null);
       }
     },
     [
@@ -309,12 +704,23 @@ export function PdfHighlighterViewer(props: PdfHighlighterViewerProps) {
         viewportHighlight.content?.text || viewportHighlight.raw_text || "",
       );
       setTooltipPosition({ x: event.clientX, y: event.clientY });
+      setSelectedPageNumber(
+        viewportHighlight.position?.boundingRect?.pageNumber || null,
+      );
+      setSelectedContextBefore(null);
+      setSelectedContextAfter(null);
+      lastAppliedDomSelectionKeyRef.current = null;
 
       const originalHighlight = extendedHighlights.find(
         (h) => h.id === viewportHighlight.id,
       );
       if (originalHighlight) {
         const paperHighlight = extendedToPaperHighlight(originalHighlight);
+        setSelectedPageNumber(
+          paperHighlight.page_number ||
+            paperHighlight.position?.boundingRect?.pageNumber ||
+            null,
+        );
         // Don't scroll - the highlight is already in view since user just clicked it
         blockScrollOnNextHighlight.current = true;
         setActiveHighlight(paperHighlight);
@@ -334,7 +740,16 @@ export function PdfHighlighterViewer(props: PdfHighlighterViewerProps) {
     if (!tooltipPosition) return;
 
     const handleOutsideClick = (e: MouseEvent) => {
-      const tooltipElement = document.querySelector(".fixed.z-30");
+      if (e.button === 2) {
+        const selectionText = window.getSelection()?.toString().trim() || "";
+        if (selectionText) {
+          return;
+        }
+      }
+
+      const tooltipElement = document.querySelector(
+        '[data-testid="inline-annotation-menu"]',
+      );
       if (!tooltipElement) return;
 
       if (!tooltipElement.contains(e.target as Node)) {
@@ -344,6 +759,9 @@ export function PdfHighlighterViewer(props: PdfHighlighterViewerProps) {
           setTooltipPosition(null);
           setIsAnnotating(false);
           setCurrentSelection(null);
+          setSelectedPageNumber(null);
+          setSelectedContextBefore(null);
+          setSelectedContextAfter(null);
         }, 10);
       }
     };
@@ -837,6 +1255,10 @@ export function PdfHighlighterViewer(props: PdfHighlighterViewerProps) {
       {/* Inline Annotation Menu */}
       {tooltipPosition && (
         <InlineAnnotationMenu
+          paperId={paperId}
+          selectedPageNumber={selectedPageNumber}
+          selectedContextBefore={selectedContextBefore}
+          selectedContextAfter={selectedContextAfter}
           selectedText={selectedText}
           tooltipPosition={tooltipPosition}
           setSelectedText={setSelectedText}
@@ -844,6 +1266,7 @@ export function PdfHighlighterViewer(props: PdfHighlighterViewerProps) {
           setIsAnnotating={setIsAnnotating}
           highlights={highlights}
           setHighlights={setHighlights}
+          isSelectionInProgress={isSelectionInProgress}
           isHighlightInteraction={isHighlightInteraction}
           activeHighlight={activeHighlight}
           addHighlight={handleAddHighlightFromMenu}

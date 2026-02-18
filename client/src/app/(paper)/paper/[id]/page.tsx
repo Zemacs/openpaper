@@ -533,6 +533,7 @@ export default function PaperView() {
                         <div className="w-full h-full">
                             {paperData.file_url && (
                                 <PdfHighlighterViewer
+                                    paperId={id}
                                     pdfUrl={paperData.file_url}
                                     explicitSearchTerm={explicitSearchTerm}
                                     setUserMessageReferences={setUserMessageReferences}
@@ -617,6 +618,7 @@ export default function PaperView() {
                     {paperData.file_url && (
                         <div className="w-full h-full">
                             <PdfHighlighterViewer
+                                paperId={id}
                                 pdfUrl={paperData.file_url}
                                 explicitSearchTerm={explicitSearchTerm}
                                 setUserMessageReferences={setUserMessageReferences}
