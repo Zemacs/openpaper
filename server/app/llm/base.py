@@ -34,9 +34,8 @@ class BaseLLMClient:
         self.default_provider = default_provider
         self._providers: Dict[LLMProvider, BaseLLMProvider] = {}
 
-        # Initialize all providers to ensure they are ready for use
-        for provider in LLMProvider:
-            self._initialize_provider(provider)
+        # Initialize the default provider; others are initialized on demand
+        self._initialize_provider(default_provider)
 
     def get_chat_model_options(self) -> Dict[LLMProvider, str]:
         def _get_display_name(model_name: str) -> str:

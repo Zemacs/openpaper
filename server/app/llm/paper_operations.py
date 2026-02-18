@@ -3,7 +3,7 @@ import re
 import uuid
 from typing import AsyncGenerator, Literal, Optional, Sequence, Union
 
-import httpx
+import requests as http_requests
 from app.database.crud.paper_crud import paper_crud
 from app.database.models import Paper
 from app.llm.base import BaseLLMClient
@@ -80,8 +80,10 @@ class PaperOperations(BaseLLMClient):
                 f"Could not generate presigned URL for paper with ID {paper_id}."
             )
 
-        # Retrieve and encode the PDF byte
-        pdf_bytes = httpx.get(signed_url).content
+        # Retrieve and encode the PDF bytes
+        response = http_requests.get(signed_url, timeout=60)
+        response.raise_for_status()
+        pdf_bytes = response.content
 
         message_content = [
             FileContent(
@@ -178,8 +180,10 @@ class PaperOperations(BaseLLMClient):
                 f"Could not generate presigned URL for paper with ID {paper_id}."
             )
 
-        # Retrieve and encode the PDF byte
-        pdf_bytes = httpx.get(signed_url).content
+        # Retrieve and encode the PDF bytes
+        response = http_requests.get(signed_url, timeout=60)
+        response.raise_for_status()
+        pdf_bytes = response.content
 
         message_content = [
             TextContent(text=formatted_prompt),
