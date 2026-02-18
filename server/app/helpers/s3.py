@@ -8,12 +8,14 @@ from typing import Dict, List, Optional
 
 import boto3
 import requests
+from botocore.config import Config as BotoConfig
+from botocore.exceptions import ClientError
+from sqlalchemy.orm import Session
+
 from app.database.crud.paper_crud import PaperUpdate, paper_crud
 from app.database.crud.projects.project_paper_crud import project_paper_crud
 from app.database.models import Paper, User
 from app.schemas.user import CurrentUser
-from botocore.exceptions import ClientError
-from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +25,11 @@ AWS_SECRET_ACCESS_KEY = os.environ.get("AWS_SECRET_ACCESS_KEY")
 AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
 S3_BUCKET_NAME = os.environ.get("S3_BUCKET_NAME")
 CLOUDFLARE_BUCKET_NAME = os.environ.get("CLOUDFLARE_BUCKET_NAME")
+S3_ENDPOINT_URL = os.environ.get(
+    "S3_ENDPOINT_URL"
+)  # For S3-compatible services (MinIO, R2, etc.)
+# Use http:// for S3-compatible services (MinIO), https:// for production (Cloudflare R2, AWS S3)
+FILE_URL_SCHEME = "http" if S3_ENDPOINT_URL else "https"
 
 UPLOAD_DIR = os.getenv("UPLOAD_DIR", "uploads")
 
@@ -32,11 +39,18 @@ class S3Service:
 
     def __init__(self):
         """Initialize S3 client"""
+        client_kwargs = {
+            "aws_access_key_id": AWS_ACCESS_KEY_ID,
+            "aws_secret_access_key": AWS_SECRET_ACCESS_KEY,
+            "region_name": AWS_REGION,
+        }
+        if S3_ENDPOINT_URL:
+            client_kwargs["endpoint_url"] = S3_ENDPOINT_URL
+            # Use path-style addressing for S3-compatible services (MinIO, R2, etc.)
+            client_kwargs["config"] = BotoConfig(s3={"addressing_style": "path"})
         self.s3_client = boto3.client(
             "s3",  # type: ignore
-            aws_access_key_id=AWS_ACCESS_KEY_ID,
-            aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
-            region_name=AWS_REGION,
+            **client_kwargs,
         )
         self.bucket_name = S3_BUCKET_NAME
         self.cloudflare_bucket_name = CLOUDFLARE_BUCKET_NAME
@@ -89,7 +103,7 @@ class S3Service:
                 )
 
             # Generate the URL for the uploaded file
-            file_url = f"https://{self.cloudflare_bucket_name}/{object_key}"
+            file_url = f"{FILE_URL_SCHEME}://{self.cloudflare_bucket_name}/{object_key}"
 
             return object_key, file_url
 
@@ -128,7 +142,7 @@ class S3Service:
             )
 
             # Generate the URL for the uploaded file
-            file_url = f"https://{self.cloudflare_bucket_name}/{object_key}"
+            file_url = f"{FILE_URL_SCHEME}://{self.cloudflare_bucket_name}/{object_key}"
 
             return object_key, file_url
 
@@ -518,7 +532,9 @@ class S3Service:
             )
 
             # Generate the URL for the duplicated file
-            file_url = f"https://{self.cloudflare_bucket_name}/{new_object_key}"
+            file_url = (
+                f"{FILE_URL_SCHEME}://{self.cloudflare_bucket_name}/{new_object_key}"
+            )
 
             return new_object_key, file_url
 
@@ -539,10 +555,21 @@ class S3Service:
         """
         try:
             # Extract the object key from the URL
-            parsed_url = s3_url.split(f"https://{self.cloudflare_bucket_name}/")
-            if len(parsed_url) != 2:
+            normalized_url = s3_url.split("?", 1)[0]
+            prefixes = (
+                f"https://{self.cloudflare_bucket_name}/",
+                f"http://{self.cloudflare_bucket_name}/",
+            )
+            source_object_key = next(
+                (
+                    normalized_url[len(prefix) :]
+                    for prefix in prefixes
+                    if normalized_url.startswith(prefix)
+                ),
+                None,
+            )
+            if not source_object_key:
                 raise ValueError("Invalid S3 URL format")
-            source_object_key = parsed_url[1]
 
             return self.duplicate_file(source_object_key, new_filename)
 

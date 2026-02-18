@@ -7,6 +7,7 @@ import uuid
 from typing import Tuple
 
 import boto3 # type: ignore
+from botocore.config import Config as BotoConfig # type: ignore
 from botocore.exceptions import ClientError # type: ignore
 
 logger = logging.getLogger(__name__)
@@ -17,6 +18,9 @@ AWS_SECRET_ACCESS_KEY = os.environ.get("AWS_SECRET_ACCESS_KEY")
 AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
 S3_BUCKET_NAME = os.environ.get("S3_BUCKET_NAME")
 CLOUDFLARE_BUCKET_NAME = os.environ.get("CLOUDFLARE_BUCKET_NAME")
+S3_ENDPOINT_URL = os.environ.get("S3_ENDPOINT_URL")  # For S3-compatible services (MinIO, R2, etc.)
+# Use http:// for S3-compatible services (MinIO), https:// for production (Cloudflare R2, AWS S3)
+FILE_URL_SCHEME = "http" if S3_ENDPOINT_URL else "https"
 UPLOAD_DIR = os.environ.get("UPLOAD_DIR", "uploads")
 
 
@@ -25,11 +29,18 @@ class S3Service:
 
     def __init__(self):
         """Initialize S3 client"""
+        client_kwargs = {
+            "aws_access_key_id": AWS_ACCESS_KEY_ID,
+            "aws_secret_access_key": AWS_SECRET_ACCESS_KEY,
+            "region_name": AWS_REGION,
+        }
+        if S3_ENDPOINT_URL:
+            client_kwargs["endpoint_url"] = S3_ENDPOINT_URL
+            # Use path-style addressing for S3-compatible services (MinIO, R2, etc.)
+            client_kwargs["config"] = BotoConfig(s3={"addressing_style": "path"})
         self.s3_client = boto3.client(
             "s3",
-            aws_access_key_id=AWS_ACCESS_KEY_ID,
-            aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
-            region_name=AWS_REGION,
+            **client_kwargs,
         )
         self.bucket_name = S3_BUCKET_NAME
         self.cloudflare_bucket_name = CLOUDFLARE_BUCKET_NAME
@@ -77,7 +88,7 @@ class S3Service:
             Body=file_bytes,
             ContentType=content_type,
         )
-        file_url = f"https://{self.cloudflare_bucket_name}/{object_key}"
+        file_url = f"{FILE_URL_SCHEME}://{self.cloudflare_bucket_name}/{object_key}"
         return object_key, file_url
 
     def upload_any_file(
@@ -111,7 +122,7 @@ class S3Service:
                 )
 
             # Generate the URL for the uploaded file
-            file_url = f"https://{self.cloudflare_bucket_name}/{object_key}"
+            file_url = f"{FILE_URL_SCHEME}://{self.cloudflare_bucket_name}/{object_key}"
 
             return object_key, file_url
         except ClientError as e:
