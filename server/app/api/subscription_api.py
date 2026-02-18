@@ -40,6 +40,15 @@ stripe.api_key = STRIPE_API_KEY
 subscription_router = APIRouter()
 
 
+def _require_stripe():
+    """Raise 503 if Stripe is not configured."""
+    if not STRIPE_API_KEY:
+        raise HTTPException(
+            status_code=503,
+            detail="Subscription service is not configured. Set STRIPE_API_KEY to enable.",
+        )
+
+
 class SubscriptionInterval(str, Enum):
     MONTHLY = "month"
     YEARLY = "year"
@@ -51,6 +60,7 @@ def create_checkout_session(
     db: Session = Depends(get_db),
     current_user: CurrentUser = Depends(get_required_user),
 ):
+    _require_stripe()
     if interval not in SubscriptionInterval:
         raise HTTPException(status_code=400, detail="Invalid subscription interval")
 
@@ -313,6 +323,7 @@ async def handle_stripe_webhook(
     """
     Handle Stripe webhook events for subscription management
     """
+    _require_stripe()
 
     def is_valid_price_id(price_id: str) -> bool:
         """Check if the price ID is one of our configured prices."""
@@ -865,6 +876,7 @@ def create_customer_portal_session(
     current_user: CurrentUser = Depends(get_required_user),
 ):
     """Create a Stripe customer portal session for the current user"""
+    _require_stripe()
     try:
         # Get the user's subscription to retrieve the Stripe customer ID
         subscription = subscription_crud.get_by_user_id(db, current_user.id)
@@ -910,6 +922,7 @@ def resubscribe(
     - User must have a Stripe customer ID
     - User must have a Stripe subscription ID (active, canceled, or scheduled for cancellation)
     """
+    _require_stripe()
     try:
         # Get the user's existing subscription
         subscription = subscription_crud.get_by_user_id(db, current_user.id)
@@ -1137,6 +1150,7 @@ def change_subscription_interval(
     """
     Change the billing interval of the current user's subscription.
     """
+    _require_stripe()
     try:
         # Get the user's current subscription
         subscription = subscription_crud.get_by_user_id(db, current_user.id)
