@@ -8,7 +8,7 @@ packages = ["src"]
 [project]
 name = "open-paper-jobs"
 version = "0.1.0"
-requires-python = ">= 3.12"
+requires-python = ">= 3.12, < 3.14"
 description = "An Application to Run Jobs for the Open Paper project"
 readme = "README.md"
 dependencies = [

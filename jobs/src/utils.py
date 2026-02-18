@@ -28,10 +28,12 @@ async def time_it(
     """
     start_time = time.monotonic()
     logger.info(f"Starting: {description}...")
-    yield
-    end_time = time.monotonic()
-    duration = end_time - start_time
-    logger.info(f"Finished: {description}. Duration: {duration:.2f} seconds")
+    try:
+        yield
+    finally:
+        end_time = time.monotonic()
+        duration = end_time - start_time
+        logger.info(f"Finished: {description}. Duration: {duration:.2f} seconds")
 
     if job_id:
         event_name = f"timer:{description.lower().replace(' ', '_')}"
@@ -63,13 +65,13 @@ def retry_llm_operation(max_retries: int = 3, delay: float = 1.0):
                     if attempt < max_retries:
                         # Calculate exponential backoff with jitter
                         backoff_time = delay * (2**attempt) * (0.5 + 0.5 * random.random())
-                        logger.debug(
+                        logger.warning(
                             f"Retry {attempt+1}/{max_retries} for {func.__name__}: {str(e)}. "
                             f"Retrying in {backoff_time:.2f}s"
                         )
                         await asyncio.sleep(backoff_time)
                     else:
-                        logger.debug(f"All {max_retries} retries failed for {func.__name__}")
+                        logger.error(f"All {max_retries} retries failed for {func.__name__}")
 
             # If we reach here, all retries failed
             if last_exception is not None:

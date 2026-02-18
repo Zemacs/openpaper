@@ -13,6 +13,10 @@ from typing import Any, Dict, Optional
 from uuid import UUID
 
 import requests
+from celery import Celery
+from dotenv import load_dotenv
+from sqlalchemy.orm import Session
+
 from app.database.crud.paper_crud import PaperCreate, paper_crud
 from app.database.crud.projects.project_paper_crud import (
     ProjectPaperCreate,
@@ -23,9 +27,6 @@ from app.database.telemetry import track_event
 from app.helpers.s3 import s3_service
 from app.schemas.responses import DataTableSchema
 from app.schemas.user import CurrentUser
-from celery import Celery
-from dotenv import load_dotenv
-from sqlalchemy.orm import Session
 
 load_dotenv()
 
@@ -51,14 +52,16 @@ class JobsClient:
             celery_api_url: Base URL of the Celery API service for status checks
                            (e.g., "http://localhost:8001")
         """
-        self.webhook_base_url = webhook_base_url or os.getenv(
-            "WEBHOOK_BASE_URL", "http://localhost:8000"
+        self.webhook_base_url = (
+            webhook_base_url or os.getenv("WEBHOOK_BASE_URL") or "http://localhost:8000"
         )
-        self.celery_broker_url = celery_broker_url or os.getenv(
-            "CELERY_BROKER_URL", "redis://localhost:6379"
+        self.celery_broker_url = (
+            celery_broker_url
+            or os.getenv("CELERY_BROKER_URL")
+            or "pyamqp://guest@localhost:5672//"
         )
-        self.celery_api_url = celery_api_url or os.getenv(
-            "CELERY_API_URL", "http://localhost:8001"
+        self.celery_api_url = (
+            celery_api_url or os.getenv("CELERY_API_URL") or "http://localhost:8001"
         )
 
     def submit_pdf_processing_job(self, s3_object_key: str, job_id: str) -> str:
