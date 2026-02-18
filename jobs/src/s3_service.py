@@ -18,9 +18,12 @@ AWS_SECRET_ACCESS_KEY = os.environ.get("AWS_SECRET_ACCESS_KEY")
 AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
 S3_BUCKET_NAME = os.environ.get("S3_BUCKET_NAME")
 CLOUDFLARE_BUCKET_NAME = os.environ.get("CLOUDFLARE_BUCKET_NAME")
-S3_ENDPOINT_URL = os.environ.get("S3_ENDPOINT_URL")  # For S3-compatible services (MinIO, R2, etc.)
-# Use http:// for S3-compatible services (MinIO), https:// for production (Cloudflare R2, AWS S3)
-FILE_URL_SCHEME = "http" if S3_ENDPOINT_URL else "https"
+S3_ENDPOINT_URL = os.environ.get("S3_ENDPOINT_URL")
+# Explicit override via env var; otherwise infer from endpoint URL scheme, default to https.
+FILE_URL_SCHEME = os.environ.get(
+    "FILE_URL_SCHEME",
+    S3_ENDPOINT_URL.split("://")[0] if S3_ENDPOINT_URL else "https",
+)
 UPLOAD_DIR = os.environ.get("UPLOAD_DIR", "uploads")
 
 
