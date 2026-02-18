@@ -17,7 +17,7 @@ from app.llm.provider import (
     StreamChunk,
     ToolCallResult,
 )
-from app.llm.utils import retry_llm_operation
+from app.llm.utils import is_transient_llm_error, retry_llm_operation
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +33,15 @@ class BaseLLMClient:
     def __init__(self, default_provider: LLMProvider = LLMProvider.GEMINI):
         self.default_provider = default_provider
         self._providers: Dict[LLMProvider, BaseLLMProvider] = {}
+        self.content_retry_max = max(
+            0, int(os.getenv("LLM_CONTENT_RETRY_MAX", "1"))
+        )
+        self.stream_retry_max = max(
+            0, int(os.getenv("LLM_STREAM_RETRY_MAX", "2"))
+        )
+        self.transient_retry_delay_seconds = max(
+            0.1, float(os.getenv("LLM_TRANSIENT_RETRY_DELAY_SECONDS", "0.8"))
+        )
 
         # Initialize the default provider; others are initialized on demand
         self._initialize_provider(default_provider)
@@ -104,8 +113,7 @@ class BaseLLMClient:
         else:
             raise ValueError(f"Unsupported model type: {model_type}")
 
-    @retry_llm_operation(max_retries=3, delay=1.0)
-    def generate_content(
+    def _generate_content_impl(
         self,
         contents: Any,
         system_prompt: Optional[str] = None,
@@ -118,13 +126,7 @@ class BaseLLMClient:
         schema: Optional[Dict] = None,
         **kwargs,
     ) -> LLMResponse:
-        """Generate content using the specified provider. Automatically retries on transient errors.
-
-        Args:
-            schema: Optional JSON schema dict for structured output. When provided,
-                the LLM response will be constrained to match this schema via
-                the provider's native structured output support.
-        """
+        """Generate content using the specified provider."""
         start_time = time.time()
         model = self._get_model_for_type(model_type, provider)
         target_provider = provider or self.default_provider
@@ -184,6 +186,111 @@ class BaseLLMClient:
             )
             raise
 
+    @retry_llm_operation(max_retries=3, delay=1.0)
+    def generate_content(
+        self,
+        contents: Any,
+        system_prompt: Optional[str] = None,
+        history: Optional[List[Message]] = None,
+        function_declarations: Optional[List[Dict]] = None,
+        tool_call_results: Optional[List[ToolCallResult]] = None,
+        model_type: ModelType = ModelType.DEFAULT,
+        provider: Optional[LLMProvider] = None,
+        enable_thinking: bool = True,
+        schema: Optional[Dict] = None,
+        **kwargs,
+    ) -> LLMResponse:
+        """Generate content using the specified provider. Automatically retries on transient errors.
+
+        Args:
+            schema: Optional JSON schema dict for structured output. When provided,
+                the LLM response will be constrained to match this schema via
+                the provider's native structured output support.
+        """
+        return self._generate_content_impl(
+            contents=contents,
+            system_prompt=system_prompt,
+            history=history,
+            function_declarations=function_declarations,
+            tool_call_results=tool_call_results,
+            model_type=model_type,
+            provider=provider,
+            enable_thinking=enable_thinking,
+            schema=schema,
+            **kwargs,
+        )
+
+    def generate_content_once(
+        self,
+        contents: Any,
+        system_prompt: Optional[str] = None,
+        history: Optional[List[Message]] = None,
+        function_declarations: Optional[List[Dict]] = None,
+        tool_call_results: Optional[List[ToolCallResult]] = None,
+        model_type: ModelType = ModelType.DEFAULT,
+        provider: Optional[LLMProvider] = None,
+        enable_thinking: bool = True,
+        schema: Optional[Dict] = None,
+        **kwargs,
+    ) -> LLMResponse:
+        """Generate content once without retry policy."""
+        return self._generate_content_impl(
+            contents=contents,
+            system_prompt=system_prompt,
+            history=history,
+            function_declarations=function_declarations,
+            tool_call_results=tool_call_results,
+            model_type=model_type,
+            provider=provider,
+            enable_thinking=enable_thinking,
+            schema=schema,
+            **kwargs,
+        )
+
+    def generate_content_resilient(
+        self,
+        contents: Any,
+        system_prompt: Optional[str] = None,
+        history: Optional[List[Message]] = None,
+        function_declarations: Optional[List[Dict]] = None,
+        tool_call_results: Optional[List[ToolCallResult]] = None,
+        model_type: ModelType = ModelType.DEFAULT,
+        provider: Optional[LLMProvider] = None,
+        enable_thinking: bool = True,
+        schema: Optional[Dict] = None,
+        max_retries: Optional[int] = None,
+        **kwargs,
+    ) -> LLMResponse:
+        retry_max = (
+            self.content_retry_max if max_retries is None else max(0, max_retries)
+        )
+        attempt = 0
+
+        while True:
+            try:
+                return self._generate_content_impl(
+                    contents=contents,
+                    system_prompt=system_prompt,
+                    history=history,
+                    function_declarations=function_declarations,
+                    tool_call_results=tool_call_results,
+                    model_type=model_type,
+                    provider=provider,
+                    enable_thinking=enable_thinking,
+                    schema=schema,
+                    **kwargs,
+                )
+            except Exception as e:
+                if attempt >= retry_max or not is_transient_llm_error(e):
+                    raise
+
+                backoff = self.transient_retry_delay_seconds * (2**attempt)
+                logger.warning(
+                    f"Transient LLM error in generate_content_resilient (attempt {attempt + 1}/{retry_max + 1}): {type(e).__name__}: {str(e)[:120]}. Retrying in {backoff:.2f}s."
+                )
+                time.sleep(backoff)
+                attempt += 1
+
     def send_message_stream(
         self,
         message: MessageParam,
@@ -194,11 +301,35 @@ class BaseLLMClient:
         provider: Optional[LLMProvider] = None,
         **kwargs,
     ) -> Iterator[StreamChunk]:
-        """Send a message and stream the response"""
+        """Send a message and stream the response with transient retry before first chunk."""
         model = self._get_model_for_type(model_type, provider)
-        return self._get_provider(provider).send_message_stream(
-            model, message, history, system_prompt, file, **kwargs
-        )
+        provider_instance = self._get_provider(provider)
+        attempt = 0
+
+        while True:
+            emitted_chunk = False
+            try:
+                for chunk in provider_instance.send_message_stream(
+                    model, message, history, system_prompt, file, **kwargs
+                ):
+                    emitted_chunk = True
+                    yield chunk
+                return
+            except Exception as e:
+                should_retry = (
+                    attempt < self.stream_retry_max
+                    and not emitted_chunk
+                    and is_transient_llm_error(e)
+                )
+                if not should_retry:
+                    raise
+
+                backoff = self.transient_retry_delay_seconds * (2**attempt)
+                logger.warning(
+                    f"Transient stream error (attempt {attempt + 1}/{self.stream_retry_max + 1}): {type(e).__name__}: {str(e)[:120]}. Retrying in {backoff:.2f}s."
+                )
+                time.sleep(backoff)
+                attempt += 1
 
     # Convenience properties for backward compatibility
     @property

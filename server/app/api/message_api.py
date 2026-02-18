@@ -19,6 +19,7 @@ from app.database.telemetry import track_event
 from app.llm.base import LLMProvider
 from app.llm.citation_handler import CitationHandler
 from app.llm.operations import operations
+from app.llm.utils import format_llm_error_for_client, get_llm_error_category
 from app.schemas.message import EvidenceCollection, ResponseStyle
 from app.schemas.user import CurrentUser
 from dotenv import load_dotenv
@@ -291,6 +292,7 @@ async def chat_message_multipaper(
                     "everything_chat_message_error",
                     properties={
                         "error": str(e),
+                        "category": get_llm_error_category(e),
                         "type": "everything",
                         "conversation_id": str(request.conversation_id),
                     },
@@ -298,7 +300,7 @@ async def chat_message_multipaper(
                 )
 
                 logger.error(f"Error in streaming response: {e}", exc_info=True)
-                yield f"{json.dumps({'type': 'error', 'content': str(e)})}{END_DELIMITER}"
+                yield f"{json.dumps({'type': 'error', 'content': format_llm_error_for_client(e)})}{END_DELIMITER}"
 
         return StreamingResponse(response_generator(), media_type="text/event-stream")
 
@@ -426,6 +428,7 @@ async def chat_message_stream(
                     "chat_message_error",
                     properties={
                         "error": str(e),
+                        "category": get_llm_error_category(e),
                         "paper_id": str(request.paper_id),
                         "conversation_id": str(request.conversation_id),
                     },
@@ -433,7 +436,7 @@ async def chat_message_stream(
                 )
 
                 logger.error(f"Error in streaming response: {e}", exc_info=True)
-                yield f"{json.dumps({'type': 'error', 'content': str(e)})}{END_DELIMITER}"
+                yield f"{json.dumps({'type': 'error', 'content': format_llm_error_for_client(e)})}{END_DELIMITER}"
 
         return StreamingResponse(response_generator(), media_type="text/event-stream")
 

@@ -27,6 +27,7 @@ from google.genai.types import (
     FunctionDeclaration,
     GenerateContentConfig,
     GenerateContentResponse,
+    HttpOptions,
     Part,
     ThinkingConfig,
     Tool,
@@ -162,9 +163,25 @@ class GeminiProvider(BaseLLMProvider):
         if not self.api_key:
             raise ValueError("GEMINI_API_KEY environment variable is required")
 
-        self._client = genai.Client(api_key=self.api_key)
-        self._default_model = "gemini-3-flash-preview"
-        self._fast_model = "gemini-3-flash-preview"
+        timeout_seconds = int(os.getenv("LLM_REQUEST_TIMEOUT_SECONDS", "20"))
+        stream_timeout_seconds = int(os.getenv("LLM_STREAM_TIMEOUT_SECONDS", "180"))
+        self.request_timeout_seconds = max(5, timeout_seconds)
+        self.stream_timeout_seconds = max(
+            self.request_timeout_seconds, stream_timeout_seconds
+        )
+        # google.genai HttpOptions.timeout expects milliseconds.
+        request_timeout_ms = self.request_timeout_seconds * 1000
+        stream_timeout_ms = self.stream_timeout_seconds * 1000
+        self._client = genai.Client(
+            api_key=self.api_key,
+            http_options=HttpOptions(timeout=request_timeout_ms),
+        )
+        self._stream_client = genai.Client(
+            api_key=self.api_key,
+            http_options=HttpOptions(timeout=stream_timeout_ms),
+        )
+        self._default_model = os.getenv("GEMINI_DEFAULT_MODEL", "gemini-2.0-flash")
+        self._fast_model = os.getenv("GEMINI_FAST_MODEL", "gemini-2.0-flash")
 
     @property
     def client(self) -> genai.Client:
@@ -289,7 +306,8 @@ class GeminiProvider(BaseLLMProvider):
             history=history, new_message=message, file=file
         )
 
-        response_stream = self.client.models.generate_content_stream(
+        # Use a dedicated client with a longer timeout for streaming chat responses.
+        response_stream = self._stream_client.models.generate_content_stream(
             model=model,
             contents=contents,
             config=config,
@@ -442,7 +460,13 @@ class OpenAIProvider(BaseLLMProvider):
 
         # For standard OpenAI, base_url should be None. For OpenAI-compatible
         # providers, pass a custom base_url when constructing this provider.
-        self._client = openai.OpenAI(api_key=self.api_key, base_url=base_url)
+        timeout_seconds = int(os.getenv("LLM_REQUEST_TIMEOUT_SECONDS", "20"))
+        self.request_timeout_seconds = max(5, timeout_seconds)
+        self._client = openai.OpenAI(
+            api_key=self.api_key,
+            base_url=base_url,
+            timeout=self.request_timeout_seconds,
+        )
         self._default_model = default_model or "gpt-4.1"
         self._fast_model = fast_model or "gpt-4.1-2025-04-14"
 

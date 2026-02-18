@@ -7,19 +7,90 @@ import random
 import time
 from typing import Any, Callable, Tuple
 
+import httpx
 import openai
 
 logger = logging.getLogger(__name__)
+
+try:
+    from google.genai import errors as genai_errors
+except Exception:  # pragma: no cover - optional import safety
+    genai_errors = None
+
+_GENAI_RETRYABLE_EXCEPTIONS: tuple[type[BaseException], ...] = ()
+if genai_errors:
+    _GENAI_RETRYABLE_EXCEPTIONS = (
+        genai_errors.ClientError,
+        genai_errors.ServerError,
+    )
 
 # Exceptions that should trigger a retry with backoff
 RETRYABLE_EXCEPTIONS = (
     ValueError,
     json.JSONDecodeError,
+    httpx.HTTPError,
+    httpx.RemoteProtocolError,
     openai.InternalServerError,  # 500, 503
     openai.RateLimitError,  # 429
     openai.APIConnectionError,  # Network issues
     openai.APITimeoutError,  # Timeouts
+    *_GENAI_RETRYABLE_EXCEPTIONS,
 )
+
+_TRANSIENT_ERROR_HINTS = (
+    "429",
+    "too many requests",
+    "resource exhausted",
+    "rate limit",
+    "temporarily unavailable",
+    "timed out",
+    "timeout",
+    "read operation timed out",
+    "connect timeout",
+    "connecterror",
+    "connection reset",
+    "connection aborted",
+    "unexpected eof",
+    "ssl",
+    "tls",
+    "service unavailable",
+)
+
+
+def is_transient_llm_error(error: BaseException) -> bool:
+    if isinstance(error, RETRYABLE_EXCEPTIONS):
+        return True
+
+    message = str(error).lower()
+    return any(marker in message for marker in _TRANSIENT_ERROR_HINTS)
+
+
+def get_llm_error_category(error: BaseException) -> str:
+    message = str(error).lower()
+    if "429" in message or "too many requests" in message or "resource exhausted" in message:
+        return "rate_limited"
+    if "timed out" in message or "timeout" in message:
+        return "timeout"
+    if (
+        "connect" in message
+        or "connection" in message
+        or "ssl" in message
+        or "tls" in message
+        or "eof" in message
+    ):
+        return "network"
+    return "unknown"
+
+
+def format_llm_error_for_client(error: BaseException) -> str:
+    category = get_llm_error_category(error)
+    if category == "rate_limited":
+        return "LLM provider is busy. Please retry in a few seconds."
+    if category == "timeout":
+        return "LLM provider timed out. Please retry."
+    if category == "network":
+        return "LLM provider connection was interrupted. Please retry."
+    return "LLM provider is temporarily unavailable. Please retry."
 
 
 def retry_llm_operation(max_retries: int = 3, delay: float = 1.0):

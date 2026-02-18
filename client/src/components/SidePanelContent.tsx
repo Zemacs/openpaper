@@ -53,6 +53,17 @@ import { useSubscription, getChatCreditUsagePercentage, isChatCreditAtLimit, isC
 import { Avatar, AvatarFallback, AvatarImage } from './ui/avatar';
 import { getAlphaHashToBackgroundColor, getInitials } from '@/lib/utils';
 
+const TRANSIENT_STREAM_ERROR_MARKERS = [
+    "llm provider is busy",
+    "timed out",
+    "timeout",
+    "temporarily unavailable",
+    "connection was interrupted",
+    "network",
+    "429",
+    "503",
+];
+
 
 interface SidePanelContentProps {
     rightSideFunction: string;
@@ -141,6 +152,11 @@ export function SidePanelContent({
     const messagesContainerRef = useRef<HTMLDivElement | null>(null);
 
     const END_DELIMITER = "END_OF_STREAM";
+
+    const isTransientStreamError = useCallback((error: unknown): boolean => {
+        const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
+        return TRANSIENT_STREAM_ERROR_MARKERS.some(marker => message.includes(marker));
+    }, []);
 
     const COMPREHENSIVE_OVERVIEW_DISPLAY = "Create a comprehensive overview";
     const COMPREHENSIVE_OVERVIEW_PROMPT = "Create a comprehensive, thoughtful brief for this paper. Separate each section with clear headings covering: Key Takeaways (the main points in 2-3 bullets), Background (the problem and context), Key Contributions (what's novel about this work), Methods (the approach taken), Results (main findings), Limitations (weaknesses of the study), Open Questions (gaps for future research), and Important Figures/Tables (which visuals to pay attention to). This should serve as a helpful guided reading before I dive into the paper myself.";
@@ -467,98 +483,118 @@ export function SidePanelContent({
         }
 
         try {
-            const stream = await fetchStreamFromApi('/api/message/chat/paper', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(requestBody),
-            });
-
-            setUserMessageReferences([]);
-
-            const reader = stream.getReader();
-            const decoder = new TextDecoder();
+            const maxStreamAttempts = 2;
             let accumulatedContent = '';
             let references: Reference | undefined = undefined;
-            let buffer = ''; // Buffer to accumulate partial chunks
 
-            // Debug counters
-            let chunkCount = 0;
-            let contentChunks = 0;
-            let referenceChunks = 0;
-
-            while (true) {
-                const { done, value } = await reader.read();
-
-                if (done) {
-                    // Process any remaining buffer content
-                    if (buffer.trim()) {
-                        console.warn('Unprocessed buffer at end of stream:', buffer);
+            for (let attempt = 1; attempt <= maxStreamAttempts; attempt++) {
+                try {
+                    if (attempt > 1) {
+                        setStreamingChunks([]);
+                        setStreamingReferences(undefined);
                     }
+
+                    const stream = await fetchStreamFromApi('/api/message/chat/paper', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(requestBody),
+                    });
+
+                    setUserMessageReferences([]);
+
+                    const reader = stream.getReader();
+                    const decoder = new TextDecoder();
+                    let buffer = ''; // Buffer to accumulate partial chunks
+
+                    // Debug counters
+                    let chunkCount = 0;
+                    let contentChunks = 0;
+                    let referenceChunks = 0;
+                    accumulatedContent = '';
+                    references = undefined;
+
+                    while (true) {
+                        const { done, value } = await reader.read();
+
+                        if (done) {
+                            // Process any remaining buffer content
+                            if (buffer.trim()) {
+                                console.warn('Unprocessed buffer at end of stream:', buffer);
+                            }
+                            break;
+                        }
+
+                        // Decode the chunk and add to buffer
+                        const chunk = decoder.decode(value, { stream: true });
+                        buffer += chunk;
+                        chunkCount++;
+                        console.log(`Processing chunk #${chunkCount}:`, chunk);
+
+                        // Split buffer by delimiter and process complete events
+                        const parts = buffer.split(END_DELIMITER);
+
+                        // Keep the last part (potentially incomplete) in the buffer
+                        buffer = parts.pop() || '';
+
+                        // Process all complete parts
+                        for (const event of parts) {
+                            if (!event.trim()) continue;
+
+                            try {
+                                // Parse the JSON chunk
+                                const parsedChunk = JSON.parse(event.trim());
+                                const chunkType = parsedChunk.type;
+                                const chunkContent = parsedChunk.content;
+
+                                if (chunkType === 'content') {
+                                    contentChunks++;
+                                    console.log(`Processing content chunk #${contentChunks}:`, chunkContent);
+
+                                    // Add this content to our accumulated content
+                                    accumulatedContent += chunkContent;
+
+                                    // Update the message with the new content
+                                    setStreamingChunks(prev => {
+                                        const newChunks = [...prev, chunkContent];
+                                        // Update previous content for animation tracking
+                                        return newChunks;
+                                    });
+                                }
+                                else if (chunkType === 'references') {
+                                    referenceChunks++;
+                                    console.log(`Processing references chunk #${referenceChunks}:`, chunkContent);
+
+                                    // Store the references
+                                    references = chunkContent;
+
+                                    // Update the message with the references
+                                    setStreamingReferences(chunkContent);
+                                } else if (chunkType === 'error') {
+                                    console.error('Server error in stream:', chunkContent);
+                                    throw new Error(`Server error: ${chunkContent}`);
+                                } else {
+                                    console.warn(`Unknown chunk type: ${chunkType}`);
+                                }
+                            } catch (error) {
+                                console.error('Error processing event:', error, 'Raw event:', event);
+                                // Continue processing other events rather than breaking
+                                continue;
+                            }
+                        }
+                    }
+
+                    console.log(`Stream completed. Processed ${chunkCount} chunks (${contentChunks} content, ${referenceChunks} references).`);
+                    console.log("Final accumulated content:", accumulatedContent);
+                    console.log("Final references:", references);
                     break;
-                }
-
-                // Decode the chunk and add to buffer
-                const chunk = decoder.decode(value, { stream: true });
-                buffer += chunk;
-                chunkCount++;
-                console.log(`Processing chunk #${chunkCount}:`, chunk);
-
-                // Split buffer by delimiter and process complete events
-                const parts = buffer.split(END_DELIMITER);
-
-                // Keep the last part (potentially incomplete) in the buffer
-                buffer = parts.pop() || '';
-
-                // Process all complete parts
-                for (const event of parts) {
-                    if (!event.trim()) continue;
-
-                    try {
-                        // Parse the JSON chunk
-                        const parsedChunk = JSON.parse(event.trim());
-                        const chunkType = parsedChunk.type;
-                        const chunkContent = parsedChunk.content;
-
-                        if (chunkType === 'content') {
-                            contentChunks++;
-                            console.log(`Processing content chunk #${contentChunks}:`, chunkContent);
-
-                            // Add this content to our accumulated content
-                            accumulatedContent += chunkContent;
-
-                            // Update the message with the new content
-                            setStreamingChunks(prev => {
-                                const newChunks = [...prev, chunkContent];
-                                // Update previous content for animation tracking
-                                return newChunks;
-                            });
-                        }
-                        else if (chunkType === 'references') {
-                            referenceChunks++;
-                            console.log(`Processing references chunk #${referenceChunks}:`, chunkContent);
-
-                            // Store the references
-                            references = chunkContent;
-
-                            // Update the message with the references
-                            setStreamingReferences(chunkContent);
-                        } else if (chunkType === 'error') {
-                            console.error('Server error in stream:', chunkContent);
-                            throw new Error(`Server error: ${chunkContent}`);
-                        } else {
-                            console.warn(`Unknown chunk type: ${chunkType}`);
-                        }
-                    } catch (error) {
-                        console.error('Error processing event:', error, 'Raw event:', event);
-                        // Continue processing other events rather than breaking
-                        continue;
+                } catch (error) {
+                    const shouldRetry = attempt < maxStreamAttempts && isTransientStreamError(error);
+                    if (!shouldRetry) {
+                        throw error;
                     }
+                    await new Promise(resolve => setTimeout(resolve, 700 * attempt));
                 }
             }
-
-            console.log(`Stream completed. Processed ${chunkCount} chunks (${contentChunks} content, ${referenceChunks} references).`);
-            console.log("Final accumulated content:", accumulatedContent);
-            console.log("Final references:", references);
 
             // After streaming is complete, add the full message to the state
             if (accumulatedContent) {
@@ -583,7 +619,7 @@ export function SidePanelContent({
         } finally {
             setIsStreaming(false);
         }
-    }, [currentMessage, isStreaming, conversationId, id, userMessageReferences, selectedModel, responseStyle, transformReferencesToFormat, refetchSubscription]);
+    }, [currentMessage, isStreaming, conversationId, id, userMessageReferences, selectedModel, responseStyle, transformReferencesToFormat, refetchSubscription, isTransientStreamError]);
 
 
     const handleTextareaChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
