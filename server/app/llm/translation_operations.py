@@ -489,6 +489,45 @@ class TranslationOperations:
             base = 0.74
         return round(min(0.99, max(0.4, base + (context_quality - 0.5) * 0.3)), 2)
 
+    def _generate_translation_response(
+        self,
+        user_prompt: str,
+        output_model: Type[BaseModel],
+        provider: Optional[LLMProvider] = None,
+    ):
+        return self.llm_client.generate_content_resilient(
+            contents=user_prompt,
+            system_prompt=SELECTION_TRANSLATION_SYSTEM_PROMPT,
+            model_type=ModelType.FAST,
+            enable_thinking=False,
+            schema=self._schema_for_llm(output_model),
+            provider=provider,
+            max_retries=1,
+        )
+
+    def _generate_translation_with_fallback(
+        self,
+        user_prompt: str,
+        output_model: Type[BaseModel],
+    ):
+        try:
+            return self._generate_translation_response(
+                user_prompt=user_prompt,
+                output_model=output_model,
+            )
+        except Exception:
+            if not self._can_use_openai_fallback():
+                raise
+
+            logger.warning(
+                "Primary translation provider failed; falling back to OpenAI provider."
+            )
+            return self._generate_translation_response(
+                user_prompt=user_prompt,
+                output_model=output_model,
+                provider=LLMProvider.OPENAI,
+            )
+
     def translate_selection(
         self,
         *,
@@ -509,15 +548,14 @@ class TranslationOperations:
 
         cleaned_text = re.sub(r"\s+", " ", selected_text).strip()
         mode = self._classify_mode(cleaned_text, selection_type_hint)
-        resolved_before, resolved_after, context_quality, context_match_meta = (
-            self._resolve_context(
+        resolved_before, resolved_after, context_quality, context_match_meta = self._resolve_context(
             paper,
             cleaned_text,
             page_number,
             mode,
             context_before,
             context_after,
-        ))
+        )
         cache_key = self._cache_key(
             paper_id=paper_id,
             selected_text=cleaned_text,
@@ -565,31 +603,10 @@ class TranslationOperations:
             context_after=resolved_after,
         )
 
-        try:
-            llm_response = self.llm_client.generate_content_resilient(
-                contents=user_prompt,
-                system_prompt=SELECTION_TRANSLATION_SYSTEM_PROMPT,
-                model_type=ModelType.FAST,
-                enable_thinking=False,
-                schema=self._schema_for_llm(output_model),
-                max_retries=1,
-            )
-        except Exception:
-            if not self._can_use_openai_fallback():
-                raise
-
-            logger.warning(
-                "Primary translation provider failed; falling back to OpenAI provider."
-            )
-            llm_response = self.llm_client.generate_content_resilient(
-                contents=user_prompt,
-                system_prompt=SELECTION_TRANSLATION_SYSTEM_PROMPT,
-                model_type=ModelType.FAST,
-                enable_thinking=False,
-                schema=self._schema_for_llm(output_model),
-                provider=LLMProvider.OPENAI,
-                max_retries=1,
-            )
+        llm_response = self._generate_translation_with_fallback(
+            user_prompt=user_prompt,
+            output_model=output_model,
+        )
 
         parsed_json = JSONParser.validate_and_extract_json(llm_response.text)
         validated_output = output_model.model_validate(parsed_json)

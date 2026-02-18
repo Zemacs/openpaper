@@ -1,14 +1,23 @@
 import {
-    PaperHighlight,
-} from '@/lib/schema';
-
-import { useCallback, useEffect, useLayoutEffect, useState, useRef } from "react";
+    type Dispatch,
+    type MouseEvent,
+    type ReactNode,
+    type SetStateAction,
+    useCallback,
+    useEffect,
+    useLayoutEffect,
+    useRef,
+    useState,
+} from "react";
 import { createPortal } from "react-dom";
+import { Bookmark, Copy, Highlighter, Languages, MessageCircle, Minus, X } from "lucide-react";
+
+import { type PaperHighlight } from "@/lib/schema";
+
+import { useSelectionTranslation } from "./hooks/useSelectionTranslation";
+import SelectionTranslationCard from "./SelectionTranslationCard";
 import { Button } from "./ui/button";
 import { CommandShortcut, localizeCommandToOS } from "./ui/command";
-import SelectionTranslationCard from "./SelectionTranslationCard";
-import { useSelectionTranslation } from "./hooks/useSelectionTranslation";
-import { Bookmark, Copy, Highlighter, Languages, MessageCircle, Minus, X } from "lucide-react";
 
 interface InlineAnnotationMenuProps {
     paperId?: string;
@@ -20,22 +29,128 @@ interface InlineAnnotationMenuProps {
     setSelectedText: (text: string) => void;
     setTooltipPosition: (position: { x: number; y: number } | null) => void;
     setIsAnnotating: (isAnnotating: boolean) => void;
-    highlights: Array<PaperHighlight>;
-    setHighlights: (highlights: Array<PaperHighlight>) => void;
     isSelectionInProgress?: boolean;
     isHighlightInteraction: boolean;
     activeHighlight: PaperHighlight | null;
     addHighlight: (selectedText: string, doAnnotate?: boolean) => void;
     removeHighlight: (highlight: PaperHighlight) => void;
-    setUserMessageReferences: React.Dispatch<React.SetStateAction<string[]>>;
+    setUserMessageReferences: Dispatch<SetStateAction<string[]>>;
 }
 
-const MENU_WIDTH = 280;
+interface MenuLayout {
+    left: number;
+    top: number;
+    width: number;
+    maxHeight: number;
+}
+
+interface TranslationPayload {
+    selectedText: string;
+    pageNumber?: number;
+    selectionTypeHint: "auto";
+    contextBefore?: string;
+    contextAfter?: string;
+    force?: boolean;
+}
+
+interface MenuItemButtonProps {
+    icon: ReactNode;
+    label: string;
+    shortcut: string;
+    onClick: () => void;
+    onMouseDown?: (e: MouseEvent<HTMLButtonElement>) => void;
+    destructive?: boolean;
+    testId?: string;
+}
+
+const MENU_MIN_WIDTH = 280;
 const MENU_OFFSET = 20;
 const MENU_VIEWPORT_PADDING = 12;
 const FALLBACK_MENU_HEIGHT = 460;
 const MIN_VISIBLE_MENU_HEIGHT = 120;
 const MENU_ANCHOR_RESET_THRESHOLD = 12;
+const AUTO_TRANSLATE_DELAY_MS = 250;
+
+function normalizeKeyPart(value: string | number | null | undefined): string {
+    return String(value || "").replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+function isCommandKey(event: KeyboardEvent, key: string): boolean {
+    return event.key.toLowerCase() === key.toLowerCase() && (event.ctrlKey || event.metaKey);
+}
+
+function sameLayout(a: MenuLayout | null, b: MenuLayout): boolean {
+    if (!a) return false;
+    return (
+        Math.abs(a.left - b.left) < 1
+        && Math.abs(a.top - b.top) < 1
+        && Math.abs(a.width - b.width) < 1
+        && Math.abs(a.maxHeight - b.maxHeight) < 1
+    );
+}
+
+function computeMenuWidth(viewportWidth: number, selectedTextLength: number): number {
+    const maxAvailableWidth = Math.max(220, viewportWidth - MENU_VIEWPORT_PADDING * 2);
+    const isCompactViewport = viewportWidth < 900;
+    const baseWidth = isCompactViewport
+        ? Math.round(viewportWidth * 0.92)
+        : Math.round(viewportWidth * 0.42);
+    const textBoost = Math.min(120, Math.max(0, selectedTextLength - 32) * 1.1);
+    const targetWidth = Math.min(680, Math.max(360, baseWidth + textBoost));
+    return Math.min(maxAvailableWidth, targetWidth);
+}
+
+function buildTranslationPayload(
+    selectedText: string,
+    selectedPageNumber?: number | null,
+    selectedContextBefore?: string | null,
+    selectedContextAfter?: string | null,
+    force?: boolean,
+): TranslationPayload {
+    return {
+        selectedText: selectedText.trim(),
+        pageNumber: selectedPageNumber || undefined,
+        selectionTypeHint: "auto",
+        contextBefore: selectedContextBefore || undefined,
+        contextAfter: selectedContextAfter || undefined,
+        force,
+    };
+}
+
+function MenuItemButton({
+    icon,
+    label,
+    shortcut,
+    onClick,
+    onMouseDown,
+    destructive = false,
+    testId,
+}: MenuItemButtonProps) {
+    return (
+        <Button
+            data-testid={testId}
+            variant="ghost"
+            className={[
+                "h-9 w-full px-2 text-sm font-normal",
+                "flex items-center justify-between",
+                destructive ? "text-destructive" : "",
+            ].join(" ")}
+            onMouseDown={onMouseDown}
+            onClick={(e) => {
+                e.stopPropagation();
+                onClick();
+            }}
+        >
+            <div className="flex items-center gap-2">
+                {icon}
+                {label}
+            </div>
+            <CommandShortcut className="text-muted-foreground">
+                {shortcut}
+            </CommandShortcut>
+        </Button>
+    );
+}
 
 export default function InlineAnnotationMenu(props: InlineAnnotationMenuProps) {
     const {
@@ -57,12 +172,14 @@ export default function InlineAnnotationMenu(props: InlineAnnotationMenuProps) {
     } = props;
 
     const menuRef = useRef<HTMLDivElement>(null);
-    const lastAutoTranslateKeyRef = useRef<string>("");
+    const lastAutoTranslateKeyRef = useRef("");
     const lastAnchorRef = useRef<{ x: number; y: number } | null>(null);
     const verticalPlacementRef = useRef<"above" | "below" | null>(null);
+
     const isMenuOpen = Boolean(tooltipPosition);
-    const [menuLayout, setMenuLayout] = useState<{ left: number; top: number; width: number; maxHeight: number } | null>(null);
     const [isMounted, setIsMounted] = useState(false);
+    const [menuLayout, setMenuLayout] = useState<MenuLayout | null>(null);
+
     const {
         translation,
         isTranslating,
@@ -71,6 +188,32 @@ export default function InlineAnnotationMenu(props: InlineAnnotationMenuProps) {
         retryLast,
         clear: clearTranslation,
     } = useSelectionTranslation(paperId);
+
+    const closeMenu = useCallback(() => {
+        setSelectedText("");
+        setTooltipPosition(null);
+        setIsAnnotating(false);
+    }, [setIsAnnotating, setSelectedText, setTooltipPosition]);
+
+    const requestTranslation = useCallback((force = false) => {
+        if (!paperId) return;
+        const payload = buildTranslationPayload(
+            selectedText,
+            selectedPageNumber,
+            selectedContextBefore,
+            selectedContextAfter,
+            force,
+        );
+        if (!payload.selectedText) return;
+        void translateSelection(payload);
+    }, [
+        paperId,
+        selectedText,
+        selectedPageNumber,
+        selectedContextBefore,
+        selectedContextAfter,
+        translateSelection,
+    ]);
 
     const calculateMenuLayout = useCallback(() => {
         if (!tooltipPosition) {
@@ -82,20 +225,10 @@ export default function InlineAnnotationMenu(props: InlineAnnotationMenuProps) {
 
         const viewportWidth = window.innerWidth;
         const viewportHeight = window.innerHeight;
-        const maxAvailableWidth = Math.max(220, viewportWidth - MENU_VIEWPORT_PADDING * 2);
-        const isCompactViewport = viewportWidth < 900;
-        const baseWidth = isCompactViewport
-            ? Math.round(viewportWidth * 0.92)
-            : Math.round(viewportWidth * 0.42);
-        const textBoost = Math.min(120, Math.max(0, selectedText.length - 32) * 1.1);
-        const targetWidth = Math.min(680, Math.max(360, baseWidth + textBoost));
-        const width = Math.min(maxAvailableWidth, targetWidth);
+        const width = computeMenuWidth(viewportWidth, selectedText.length);
 
-        const measuredHeight = menuRef.current?.offsetHeight;
-        const menuHeight = measuredHeight && measuredHeight > 0
-            ? measuredHeight
-            : FALLBACK_MENU_HEIGHT;
-
+        const measuredHeight = menuRef.current?.offsetHeight || FALLBACK_MENU_HEIGHT;
+        const menuHeight = measuredHeight > 0 ? measuredHeight : FALLBACK_MENU_HEIGHT;
         const anchorX = tooltipPosition.x;
         const anchorY = tooltipPosition.y;
 
@@ -108,8 +241,13 @@ export default function InlineAnnotationMenu(props: InlineAnnotationMenuProps) {
             verticalPlacementRef.current = null;
         }
 
-        let left = anchorX - width / 2;
-        left = Math.max(MENU_VIEWPORT_PADDING, Math.min(left, viewportWidth - width - MENU_VIEWPORT_PADDING));
+        const left = Math.max(
+            MENU_VIEWPORT_PADDING,
+            Math.min(
+                anchorX - width / 2,
+                viewportWidth - width - MENU_VIEWPORT_PADDING,
+            ),
+        );
 
         const preferredBelow = anchorY + MENU_OFFSET;
         const spaceBelow = viewportHeight - preferredBelow - MENU_VIEWPORT_PADDING;
@@ -127,36 +265,24 @@ export default function InlineAnnotationMenu(props: InlineAnnotationMenuProps) {
             }
         }
 
-        const preferredPlacement = verticalPlacementRef.current || "below";
+        const placement = verticalPlacementRef.current || "below";
         const maxHeight = Math.max(
             MIN_VISIBLE_MENU_HEIGHT,
-            preferredPlacement === "below" ? spaceBelow : spaceAbove,
+            placement === "below" ? spaceBelow : spaceAbove,
         );
 
         let top: number;
-        if (preferredPlacement === "below") {
-            top = preferredBelow;
+        if (placement === "below") {
             const minBottomVisibleTop = viewportHeight - MENU_VIEWPORT_PADDING - MIN_VISIBLE_MENU_HEIGHT;
-            top = Math.max(MENU_VIEWPORT_PADDING, Math.min(top, minBottomVisibleTop));
+            top = Math.max(MENU_VIEWPORT_PADDING, Math.min(preferredBelow, minBottomVisibleTop));
         } else {
             const effectiveHeight = Math.min(menuHeight, maxHeight);
-            top = anchorY - MENU_OFFSET - effectiveHeight;
-            top = Math.max(MENU_VIEWPORT_PADDING, top);
+            top = Math.max(MENU_VIEWPORT_PADDING, anchorY - MENU_OFFSET - effectiveHeight);
         }
 
-        setMenuLayout((prev) => {
-            if (
-                prev &&
-                Math.abs(prev.left - left) < 1 &&
-                Math.abs(prev.top - top) < 1 &&
-                Math.abs(prev.width - width) < 1 &&
-                Math.abs(prev.maxHeight - maxHeight) < 1
-            ) {
-                return prev;
-            }
-            return { left, top, width, maxHeight };
-        });
-    }, [selectedText, tooltipPosition]);
+        const nextLayout: MenuLayout = { left, top, width, maxHeight };
+        setMenuLayout((prev) => (sameLayout(prev, nextLayout) ? prev : nextLayout));
+    }, [selectedText.length, tooltipPosition]);
 
     useEffect(() => {
         setIsMounted(true);
@@ -165,27 +291,21 @@ export default function InlineAnnotationMenu(props: InlineAnnotationMenuProps) {
     useLayoutEffect(() => {
         if (!isMounted) return;
         calculateMenuLayout();
-        const raf = requestAnimationFrame(() => {
-            calculateMenuLayout();
-        });
-        return () => cancelAnimationFrame(raf);
+        const rafId = requestAnimationFrame(calculateMenuLayout);
+        return () => cancelAnimationFrame(rafId);
     }, [
         isMounted,
+        calculateMenuLayout,
         tooltipPosition,
         selectedText,
         translation,
         translationError,
         isTranslating,
-        calculateMenuLayout,
     ]);
 
     useEffect(() => {
         if (!isMounted) return;
-
-        const onWindowChange = () => {
-            calculateMenuLayout();
-        };
-
+        const onWindowChange = () => calculateMenuLayout();
         window.addEventListener("resize", onWindowChange);
         window.addEventListener("orientationchange", onWindowChange);
         return () => {
@@ -195,14 +315,9 @@ export default function InlineAnnotationMenu(props: InlineAnnotationMenuProps) {
     }, [isMounted, calculateMenuLayout]);
 
     useEffect(() => {
-        if (!isMounted || !tooltipPosition) return;
-        const node = menuRef.current;
-        if (!node) return;
-
-        const observer = new ResizeObserver(() => {
-            calculateMenuLayout();
-        });
-        observer.observe(node);
+        if (!isMounted || !tooltipPosition || !menuRef.current) return;
+        const observer = new ResizeObserver(calculateMenuLayout);
+        observer.observe(menuRef.current);
         return () => observer.disconnect();
     }, [isMounted, tooltipPosition, calculateMenuLayout]);
 
@@ -213,78 +328,63 @@ export default function InlineAnnotationMenu(props: InlineAnnotationMenuProps) {
             return;
         }
 
-        if (!paperId || !selectedText.trim() || !isMenuOpen) {
+        const trimmedSelectedText = selectedText.trim();
+        if (!paperId || !isMenuOpen || !trimmedSelectedText) {
             lastAutoTranslateKeyRef.current = "";
             clearTranslation();
             return;
         }
 
         const requestKey = [
-            paperId,
-            selectedText.replace(/\s+/g, " ").trim().toLowerCase(),
-            selectedPageNumber || "",
-            (selectedContextBefore || "").replace(/\s+/g, " ").trim().toLowerCase(),
-            (selectedContextAfter || "").replace(/\s+/g, " ").trim().toLowerCase(),
+            normalizeKeyPart(paperId),
+            normalizeKeyPart(trimmedSelectedText),
+            normalizeKeyPart(selectedPageNumber),
+            normalizeKeyPart(selectedContextBefore),
+            normalizeKeyPart(selectedContextAfter),
         ].join("|");
+
         if (requestKey === lastAutoTranslateKeyRef.current) {
             return;
         }
 
-        const timerId = setTimeout(() => {
+        const timerId = window.setTimeout(() => {
             lastAutoTranslateKeyRef.current = requestKey;
-            void translateSelection({
-                selectedText,
-                pageNumber: selectedPageNumber || undefined,
-                selectionTypeHint: "auto",
-                contextBefore: selectedContextBefore || undefined,
-                contextAfter: selectedContextAfter || undefined,
-            });
-        }, 250);
+            requestTranslation(false);
+        }, AUTO_TRANSLATE_DELAY_MS);
 
-        return () => clearTimeout(timerId);
+        return () => window.clearTimeout(timerId);
     }, [
         paperId,
         selectedText,
-        isMenuOpen,
-        isSelectionInProgress,
         selectedPageNumber,
         selectedContextBefore,
         selectedContextAfter,
-        translateSelection,
+        isMenuOpen,
+        isSelectionInProgress,
+        requestTranslation,
         clearTranslation,
     ]);
 
     useEffect(() => {
-        const handleMouseDown = (e: KeyboardEvent) => {
-            if (e.key === "Escape") {
-                setSelectedText("");
-                setTooltipPosition(null);
-                setIsAnnotating(false);
-            } else if (e.key === "c" && (e.ctrlKey || e.metaKey)) {
+        const handleKeyDown = (event: KeyboardEvent) => {
+            if (event.key === "Escape") {
+                closeMenu();
+            } else if (isCommandKey(event, "c")) {
                 navigator.clipboard.writeText(selectedText);
-            } else if (e.key === "a" && (e.ctrlKey || e.metaKey)) {
-                setUserMessageReferences((prev: string[]) => {
-                    const newReferences = [...prev, selectedText];
-                    return Array.from(new Set(newReferences)); // Remove duplicates
-                });
-            } else if (e.key === "t" && (e.ctrlKey || e.metaKey) && paperId) {
-                void translateSelection({
-                    selectedText,
-                    pageNumber: selectedPageNumber || undefined,
-                    selectionTypeHint: "auto",
-                    contextBefore: selectedContextBefore || undefined,
-                    contextAfter: selectedContextAfter || undefined,
-                    force: true,
-                });
-            } else if (e.key === "h" && (e.ctrlKey || e.metaKey)) {
+            } else if (isCommandKey(event, "a")) {
+                setUserMessageReferences((prev) => Array.from(new Set([...prev, selectedText])));
+            } else if (paperId && isCommandKey(event, "t")) {
+                requestTranslation(true);
+            } else if (isCommandKey(event, "h")) {
                 addHighlight(selectedText);
-                e.stopPropagation();
-            } else if (e.key === "d" && (e.ctrlKey || e.metaKey) && isHighlightInteraction && activeHighlight) {
+            } else if (
+                isCommandKey(event, "d")
+                && isHighlightInteraction
+                && activeHighlight
+            ) {
                 removeHighlight(activeHighlight);
-                setSelectedText("");
-                setTooltipPosition(null);
-                setIsAnnotating(false);
-            } else if (e.key === "e" && (e.ctrlKey || e.metaKey)) {
+                closeMenu();
+            } else if (isCommandKey(event, "e")) {
                 setIsAnnotating(true);
                 setTooltipPosition(null);
                 setSelectedText("");
@@ -292,212 +392,126 @@ export default function InlineAnnotationMenu(props: InlineAnnotationMenuProps) {
                 return;
             }
 
-            e.preventDefault();
-            e.stopPropagation();
-        }
+            event.preventDefault();
+            event.stopPropagation();
+        };
 
-        window.addEventListener("keydown", handleMouseDown);
-        return () => window.removeEventListener("keydown", handleMouseDown);
+        window.addEventListener("keydown", handleKeyDown);
+        return () => window.removeEventListener("keydown", handleKeyDown);
     }, [
+        paperId,
         selectedText,
-        setSelectedText,
-        setTooltipPosition,
-        setIsAnnotating,
-        setUserMessageReferences,
-        addHighlight,
         isHighlightInteraction,
         activeHighlight,
+        closeMenu,
+        requestTranslation,
+        addHighlight,
         removeHighlight,
-        paperId,
-        selectedPageNumber,
-        selectedContextBefore,
-        selectedContextAfter,
-        translateSelection,
+        setUserMessageReferences,
+        setIsAnnotating,
+        setSelectedText,
+        setTooltipPosition,
     ]);
 
     if (!tooltipPosition || !menuLayout || !isMounted) return null;
+
+    const preventMouseDown = (e: MouseEvent<HTMLButtonElement>) => {
+        e.preventDefault();
+    };
 
     const menuNode = (
         <div
             ref={menuRef}
             data-testid="inline-annotation-menu"
-            className="fixed z-[2147483000] bg-background shadow-lg rounded-lg p-3 border border-border overflow-y-auto"
+            className="fixed z-[2147483000] overflow-y-auto rounded-lg border border-border bg-background p-3 shadow-lg"
             style={{
                 left: `${menuLayout.left}px`,
                 top: `${menuLayout.top}px`,
                 width: `${menuLayout.width}px`,
-                minWidth: `${Math.min(MENU_WIDTH, menuLayout.width)}px`,
+                minWidth: `${Math.min(MENU_MIN_WIDTH, menuLayout.width)}px`,
                 maxHeight: `${menuLayout.maxHeight}px`,
             }}
             onClick={(e) => e.stopPropagation()}
             onMouseDown={(e) => e.stopPropagation()}
         >
             <div className="flex flex-col gap-1.5">
-                {/* Copy Button */}
-                <Button
-                    variant="ghost"
-                    className="w-full flex items-center justify-between text-sm font-normal h-9 px-2"
+                <MenuItemButton
+                    icon={<Copy size={14} />}
+                    label="Copy"
+                    shortcut={localizeCommandToOS("C")}
                     onClick={() => {
                         navigator.clipboard.writeText(selectedText);
-                        setSelectedText("");
-                        setTooltipPosition(null);
-                        setIsAnnotating(false);
+                        closeMenu();
                     }}
-                >
-                    <div className="flex items-center gap-2">
-                        <Copy size={14} />
-                        Copy
-                    </div>
-                    <CommandShortcut className="text-muted-foreground">
-                        {localizeCommandToOS('C')}
-                    </CommandShortcut>
-                </Button>
+                />
 
-                {/* Highlight Button */}
-                {
-                    !isHighlightInteraction && (
-                        <Button
-                            variant="ghost"
-                            className="w-full flex items-center justify-between text-sm font-normal h-9 px-2"
-                            onMouseDown={(e) => e.preventDefault()}
-                            onClick={(e) => {
-                                e.stopPropagation();
-                                addHighlight(selectedText, false);
-                            }}
-                        >
-                            <div className="flex items-center gap-2">
-                                <Bookmark size={14} />
-                                Save
-                            </div>
-                            <CommandShortcut className="text-muted-foreground">
-                                {localizeCommandToOS('H')}
-                            </CommandShortcut>
-                        </Button>
-                    )
-                }
-
-                {/* Annotate Button */}
-                {
-                    <Button
-                        variant="ghost"
-                        className="w-full flex items-center justify-between text-sm font-normal h-9 px-2"
-                        onMouseDown={(e) => e.preventDefault()}
-                        onClick={(e) => {
-                            e.stopPropagation();
-                            setIsAnnotating(true);
-                            setTooltipPosition(null);
-                            setSelectedText("");
-                            if (!isHighlightInteraction) {
-                                addHighlight(selectedText, true);
-                            }
-                        }}
-                    >
-                        <div className="flex items-center gap-2">
-                            <Highlighter size={14} />
-                            Annotate
-                        </div>
-                        <CommandShortcut className="text-muted-foreground">
-                            {localizeCommandToOS('E')}
-                        </CommandShortcut>
-                    </Button>
-                }
-
-                {/* Add to Chat Button */}
-                <Button
-                    variant="ghost"
-                    className="w-full flex items-center justify-between text-sm font-normal h-9 px-2"
-                    onMouseDown={(e) => e.preventDefault()}
-                    onClick={(e) => {
-                        setUserMessageReferences(prev => Array.from(new Set([...prev, selectedText])));
-                        setSelectedText("");
-                        setTooltipPosition(null);
-                        setIsAnnotating(false);
-                        e.stopPropagation();
-                    }}
-                >
-                    <div className="flex items-center gap-2">
-                        <MessageCircle size={14} />
-                        Ask
-                    </div>
-                    <CommandShortcut className="text-muted-foreground">
-                        {localizeCommandToOS('A')}
-                    </CommandShortcut>
-                </Button>
-
-                {/* Translate Button */}
-                {paperId && (
-                    <Button
-                        data-testid="inline-translate-button"
-                        variant="ghost"
-                        className="w-full flex items-center justify-between text-sm font-normal h-9 px-2"
-                        onMouseDown={(e) => e.preventDefault()}
-                        onClick={(e) => {
-                            e.stopPropagation();
-                            void translateSelection({
-                                selectedText,
-                                pageNumber: selectedPageNumber || undefined,
-                                selectionTypeHint: "auto",
-                                contextBefore: selectedContextBefore || undefined,
-                                contextAfter: selectedContextAfter || undefined,
-                                force: true,
-                            });
-                        }}
-                    >
-                        <div className="flex items-center gap-2">
-                            <Languages size={14} />
-                            Translate
-                        </div>
-                        <CommandShortcut className="text-muted-foreground">
-                            {localizeCommandToOS('T')}
-                        </CommandShortcut>
-                    </Button>
+                {!isHighlightInteraction && (
+                    <MenuItemButton
+                        icon={<Bookmark size={14} />}
+                        label="Save"
+                        shortcut={localizeCommandToOS("H")}
+                        onMouseDown={preventMouseDown}
+                        onClick={() => addHighlight(selectedText, false)}
+                    />
                 )}
 
-
-                {/* Remove Highlight Button - Only show when interacting with highlight */}
-                {isHighlightInteraction && activeHighlight && (
-                    <Button
-                        variant="ghost"
-                        className="w-full flex items-center justify-between text-sm font-normal h-9 px-2 text-destructive"
-                        onMouseDown={(e) => e.preventDefault()}
-                        onClick={(e) => {
-                            e.stopPropagation();
-                            if (activeHighlight) {
-                                removeHighlight(activeHighlight);
-                                setSelectedText("");
-                                setTooltipPosition(null);
-                                setIsAnnotating(false);
-                            }
-                        }}
-                    >
-                        <div className="flex items-center gap-2">
-                            <Minus size={14} />
-                            Delete
-                        </div>
-                        <CommandShortcut className="text-muted-foreground">
-                            {localizeCommandToOS('D')}
-                        </CommandShortcut>
-                    </Button>
-                )}
-
-                {/* Close Button */}
-                <Button
-                    variant="ghost"
-                    className="w-full flex items-center justify-between text-sm font-normal h-9 px-2"
+                <MenuItemButton
+                    icon={<Highlighter size={14} />}
+                    label="Annotate"
+                    shortcut={localizeCommandToOS("E")}
+                    onMouseDown={preventMouseDown}
                     onClick={() => {
-                        setSelectedText("");
+                        setIsAnnotating(true);
                         setTooltipPosition(null);
-                        setIsAnnotating(false);
+                        setSelectedText("");
+                        if (!isHighlightInteraction) {
+                            addHighlight(selectedText, true);
+                        }
                     }}
-                >
-                    <div className="flex items-center gap-2">
-                        <X size={14} />
-                        Close
-                    </div>
-                    <CommandShortcut className="text-muted-foreground">
-                        Esc
-                    </CommandShortcut>
-                </Button>
+                />
+
+                <MenuItemButton
+                    icon={<MessageCircle size={14} />}
+                    label="Ask"
+                    shortcut={localizeCommandToOS("A")}
+                    onMouseDown={preventMouseDown}
+                    onClick={() => {
+                        setUserMessageReferences((prev) => Array.from(new Set([...prev, selectedText])));
+                        closeMenu();
+                    }}
+                />
+
+                {paperId && (
+                    <MenuItemButton
+                        icon={<Languages size={14} />}
+                        label="Translate"
+                        shortcut={localizeCommandToOS("T")}
+                        testId="inline-translate-button"
+                        onMouseDown={preventMouseDown}
+                        onClick={() => requestTranslation(true)}
+                    />
+                )}
+
+                {isHighlightInteraction && activeHighlight && (
+                    <MenuItemButton
+                        icon={<Minus size={14} />}
+                        label="Delete"
+                        shortcut={localizeCommandToOS("D")}
+                        destructive
+                        onMouseDown={preventMouseDown}
+                        onClick={() => {
+                            removeHighlight(activeHighlight);
+                            closeMenu();
+                        }}
+                    />
+                )}
+
+                <MenuItemButton
+                    icon={<X size={14} />}
+                    label="Close"
+                    shortcut="Esc"
+                    onClick={closeMenu}
+                />
 
                 <SelectionTranslationCard
                     translation={translation}

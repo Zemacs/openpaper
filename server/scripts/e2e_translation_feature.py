@@ -14,6 +14,10 @@ from app.database.models import Paper, TranslationUsageLog, User
 from app.llm.provider import LLMProvider
 from app.main import app
 
+TRANSLATION_GENERATE_PATCH_TARGET = (
+    "app.llm.translation_operations.translation_operations.llm_client.generate_content_resilient"
+)
+
 
 @dataclass
 class StepResult:
@@ -171,12 +175,14 @@ def run() -> int:
 
     user_id, paper_id = _get_dev_user_and_paper_id(client)
     ambiguous_paper_id = _get_or_create_ambiguous_paper_id(user_id)
+    user_uuid = uuid.UUID(user_id)
+    paper_uuid = uuid.UUID(paper_id)
 
     fake_generate_content = _build_fake_llm_response()
 
     def case_word_and_cache():
         with patch(
-            "app.llm.translation_operations.translation_operations.llm_client.generate_content",
+            TRANSLATION_GENERATE_PATCH_TARGET,
             side_effect=fake_generate_content,
         ):
             payload = {
@@ -196,8 +202,8 @@ def run() -> int:
                 n_logs_before = (
                     db.query(TranslationUsageLog)
                     .filter(
-                        TranslationUsageLog.user_id == user_id,
-                        TranslationUsageLog.paper_id == paper_id,
+                        TranslationUsageLog.user_id == user_uuid,
+                        TranslationUsageLog.paper_id == paper_uuid,
                     )
                     .count()
                 )
@@ -211,8 +217,8 @@ def run() -> int:
                 n_logs_after = (
                     db.query(TranslationUsageLog)
                     .filter(
-                        TranslationUsageLog.user_id == user_id,
-                        TranslationUsageLog.paper_id == paper_id,
+                        TranslationUsageLog.user_id == user_uuid,
+                        TranslationUsageLog.paper_id == paper_uuid,
                     )
                     .count()
                 )
@@ -223,7 +229,7 @@ def run() -> int:
 
     def case_sentence():
         with patch(
-            "app.llm.translation_operations.translation_operations.llm_client.generate_content",
+            TRANSLATION_GENERATE_PATCH_TARGET,
             side_effect=fake_generate_content,
         ):
             payload = {
@@ -244,7 +250,7 @@ def run() -> int:
 
     def case_formula():
         with patch(
-            "app.llm.translation_operations.translation_operations.llm_client.generate_content",
+            TRANSLATION_GENERATE_PATCH_TARGET,
             side_effect=fake_generate_content,
         ):
             payload = {
@@ -299,13 +305,13 @@ def run() -> int:
             "translation credits should be non-negative",
         )
 
-    def case_llm_invalid_json_maps_to_502():
+    def case_llm_invalid_json_maps_to_503():
         class DummyResponse:
             def __init__(self, text: str):
                 self.text = text
 
         with patch(
-            "app.llm.translation_operations.translation_operations.llm_client.generate_content",
+            TRANSLATION_GENERATE_PATCH_TARGET,
             return_value=DummyResponse("not-a-json-payload"),
         ):
             payload = {
@@ -316,7 +322,7 @@ def run() -> int:
                 "target_language": "zh-CN",
             }
             r = client.post("/api/translate/selection", json=payload)
-            _assert(r.status_code == 502, f"expected 502, got {r.status_code}")
+            _assert(r.status_code == 503, f"expected 503, got {r.status_code}")
             body = r.json()
             _assert(
                 "temporarily unavailable" in str(body.get("detail", "")).lower(),
@@ -357,7 +363,7 @@ def run() -> int:
             "app.llm.translation_operations.translation_operations._can_use_openai_fallback",
             return_value=True,
         ), patch(
-            "app.llm.translation_operations.translation_operations.llm_client.generate_content",
+            TRANSLATION_GENERATE_PATCH_TARGET,
             side_effect=flaky_primary_then_openai,
         ):
             payload = {
@@ -381,7 +387,7 @@ def run() -> int:
             "app.llm.translation_operations.translation_operations._can_use_openai_fallback",
             return_value=False,
         ), patch(
-            "app.llm.translation_operations.translation_operations.llm_client.generate_content",
+            TRANSLATION_GENERATE_PATCH_TARGET,
             side_effect=RuntimeError("provider down"),
         ):
             payload = {
@@ -435,7 +441,7 @@ def run() -> int:
             return DummyResponse(json.dumps(payload, ensure_ascii=False))
 
         with patch(
-            "app.llm.translation_operations.translation_operations.llm_client.generate_content",
+            TRANSLATION_GENERATE_PATCH_TARGET,
             side_effect=fake_with_prompt_capture,
         ):
             payload = {
@@ -466,7 +472,7 @@ def run() -> int:
     step("Invalid Input Handling", case_invalid_input)
     step("Quota Block Handling", case_quota_block)
     step("Subscription Usage Aggregation", case_usage_aggregation)
-    step("Invalid LLM JSON -> 502", case_llm_invalid_json_maps_to_502)
+    step("Invalid LLM JSON -> 503", case_llm_invalid_json_maps_to_503)
     step("Primary Failure -> OpenAI Fallback", case_openai_fallback)
     step("Provider Failure -> 502", case_provider_failure_502)
     step("Paper Not Found -> 400", case_paper_not_found_400)

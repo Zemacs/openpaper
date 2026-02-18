@@ -123,7 +123,6 @@ export function PdfHighlighterViewer(props: PdfHighlighterViewerProps) {
     pdfUrl,
     explicitSearchTerm,
     highlights,
-    setHighlights,
     selectedText,
     setSelectedText,
     tooltipPosition,
@@ -260,8 +259,7 @@ export function PdfHighlighterViewer(props: PdfHighlighterViewerProps) {
         return false;
       }
 
-      const selected = domSelection.toString().replace(/\s+/g, " ").trim();
-      const normalizedSelected = normalizeSelectionText(selected);
+      const normalizedSelected = normalizeSelectionText(domSelection.toString());
       if (!normalizedSelected) {
         return false;
       }
@@ -367,6 +365,18 @@ export function PdfHighlighterViewer(props: PdfHighlighterViewerProps) {
     ],
   );
 
+  const applyDomSelectionWithFallback = useCallback(
+    (point?: { x: number; y: number }) => {
+      const appliedImmediately = applyDomSelection(point);
+      if (!appliedImmediately) {
+        setTimeout(() => {
+          void applyDomSelection(point);
+        }, 0);
+      }
+    },
+    [applyDomSelection],
+  );
+
   // Search hook
   const search = usePdfSearch({
     highlighterUtilsRef,
@@ -469,7 +479,7 @@ export function PdfHighlighterViewer(props: PdfHighlighterViewerProps) {
   const handleSelection = useCallback(
     (selection: PdfSelection) => {
       setCurrentSelection(selection);
-      setSelectedText(selection.content.text || "");
+      setSelectedText(normalizeSelectionText(selection.content.text || ""));
       setIsHighlightInteraction(false);
       markSelectionCompleted();
 
@@ -536,29 +546,19 @@ export function PdfHighlighterViewer(props: PdfHighlighterViewerProps) {
     const onMouseUp = (event: MouseEvent) => {
       markSelectionCompleted();
       lastPointerRef.current = { x: event.clientX, y: event.clientY, ts: Date.now() };
-      const appliedImmediately = applyDomSelection({
+      applyDomSelectionWithFallback({
         x: event.clientX,
         y: event.clientY,
       });
-      if (!appliedImmediately) {
-        setTimeout(() => {
-          void applyDomSelection({ x: event.clientX, y: event.clientY });
-        }, 0);
-      }
     };
 
     const onContextMenu = (event: MouseEvent) => {
       markSelectionCompleted();
       lastPointerRef.current = { x: event.clientX, y: event.clientY, ts: Date.now() };
-      const appliedImmediately = applyDomSelection({
+      applyDomSelectionWithFallback({
         x: event.clientX,
         y: event.clientY,
       });
-      if (!appliedImmediately) {
-        setTimeout(() => {
-          void applyDomSelection({ x: event.clientX, y: event.clientY });
-        }, 0);
-      }
     };
 
     const onPointerCancel = () => {
@@ -571,15 +571,10 @@ export function PdfHighlighterViewer(props: PdfHighlighterViewerProps) {
       if (!wasSelecting) {
         return;
       }
-      const appliedImmediately = applyDomSelection({
+      applyDomSelectionWithFallback({
         x: event.clientX,
         y: event.clientY,
       });
-      if (!appliedImmediately) {
-        setTimeout(() => {
-          void applyDomSelection({ x: event.clientX, y: event.clientY });
-        }, 0);
-      }
     };
 
     const onWindowBlur = () => {
@@ -610,7 +605,7 @@ export function PdfHighlighterViewer(props: PdfHighlighterViewerProps) {
       window.removeEventListener("blur", onWindowBlur);
       document.removeEventListener("visibilitychange", onVisibilityChange);
     };
-  }, [applyDomSelection, clearSelectionProgressTimeout, markSelectionCompleted, markSelectionStarted]);
+  }, [applyDomSelectionWithFallback, clearSelectionProgressTimeout, markSelectionCompleted, markSelectionStarted]);
 
   // Additional fallback: some browsers/plugins skip mouseup callbacks but still emit selectionchange.
   useEffect(() => {
@@ -1264,8 +1259,6 @@ export function PdfHighlighterViewer(props: PdfHighlighterViewerProps) {
           setSelectedText={setSelectedText}
           setTooltipPosition={setTooltipPosition}
           setIsAnnotating={setIsAnnotating}
-          highlights={highlights}
-          setHighlights={setHighlights}
           isSelectionInProgress={isSelectionInProgress}
           isHighlightInteraction={isHighlightInteraction}
           activeHighlight={activeHighlight}

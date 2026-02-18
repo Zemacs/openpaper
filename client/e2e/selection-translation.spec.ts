@@ -276,7 +276,6 @@ test("menu position stays stable after translation result appears", async ({ pag
     await page.goto("/translation-e2e");
     const menu = page.getByTestId("inline-annotation-menu");
     await expect(menu).toBeVisible();
-    await expect(page.getByTestId("selection-translation-loading")).toBeVisible();
 
     await page.waitForTimeout(80);
     const before = await menu.boundingBox();

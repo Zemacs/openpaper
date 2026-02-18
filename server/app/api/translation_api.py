@@ -28,7 +28,25 @@ logger = logging.getLogger(__name__)
 
 translation_router = APIRouter()
 MAX_CONTEXT_CHARS = 300
+ESTIMATED_OUTPUT_CHARS = 400
 TRANSLATION_TIMEOUT_SECONDS = int(os.getenv("TRANSLATION_TIMEOUT_SECONDS", "12"))
+
+
+def _normalize_context(text: str | None, keep_tail: bool) -> str:
+    normalized = (text or "").strip()
+    if len(normalized) <= MAX_CONTEXT_CHARS:
+        return normalized
+    if keep_tail:
+        return normalized[-MAX_CONTEXT_CHARS:]
+    return normalized[:MAX_CONTEXT_CHARS]
+
+
+def _estimate_request_chars(
+    selected_text: str,
+    context_before: str,
+    context_after: str,
+) -> int:
+    return len(selected_text) + len(context_before) + len(context_after) + ESTIMATED_OUTPUT_CHARS
 
 
 @translation_router.post("/selection", response_model=TranslateSelectionResponse)
@@ -41,20 +59,9 @@ async def translate_selection(
     if not selected_text:
         raise HTTPException(status_code=400, detail="selected_text cannot be empty.")
 
-    context_before = (request.context_before or "").strip()
-    context_after = (request.context_after or "").strip()
-    if len(context_before) > MAX_CONTEXT_CHARS:
-        context_before = context_before[-MAX_CONTEXT_CHARS:]
-    if len(context_after) > MAX_CONTEXT_CHARS:
-        context_after = context_after[:MAX_CONTEXT_CHARS]
-
-    estimated_chars = len(selected_text)
-    if context_before:
-        estimated_chars += len(context_before)
-    if context_after:
-        estimated_chars += len(context_after)
-    # Reserve output budget to avoid crossing credit limit after generation.
-    estimated_chars += 400
+    context_before = _normalize_context(request.context_before, keep_tail=True)
+    context_after = _normalize_context(request.context_after, keep_tail=False)
+    estimated_chars = _estimate_request_chars(selected_text, context_before, context_after)
 
     track_event(
         "selection_translation_requested",

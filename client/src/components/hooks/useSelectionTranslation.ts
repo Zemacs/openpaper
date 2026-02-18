@@ -1,9 +1,10 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+
 import { fetchFromApi } from "@/lib/api";
 import {
-    SelectionTranslationResponse,
-    SelectionTypeHint,
-    TranslateSelectionRequest,
+    type SelectionTranslationResponse,
+    type SelectionTypeHint,
+    type TranslateSelectionRequest,
 } from "@/lib/schema";
 
 interface TranslateSelectionInput {
@@ -16,7 +17,8 @@ interface TranslateSelectionInput {
     force?: boolean;
 }
 
-const TRANSLATION_TIMEOUT_MS = 18000;
+const TRANSLATION_TIMEOUT_MS = 18_000;
+const MAX_RETRY_ATTEMPTS = 2;
 const TRANSIENT_TRANSLATION_ERROR_MARKERS = [
     "llm provider is busy",
     "timed out",
@@ -28,9 +30,64 @@ const TRANSIENT_TRANSLATION_ERROR_MARKERS = [
     "429",
 ];
 
+function normalizeForKey(value: string | number | null | undefined): string {
+    return String(value || "").replace(/\s+/g, " ").trim().toLowerCase();
+}
+
 function isTransientTranslationError(error: unknown): boolean {
     const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
-    return TRANSIENT_TRANSLATION_ERROR_MARKERS.some(marker => message.includes(marker));
+    return TRANSIENT_TRANSLATION_ERROR_MARKERS.some((marker) => message.includes(marker));
+}
+
+function toErrorMessage(error: unknown, fallback: string): string {
+    return error instanceof Error ? error.message : fallback;
+}
+
+function buildRequestBody(
+    paperId: string,
+    payload: TranslateSelectionInput,
+    selectedText: string,
+): TranslateSelectionRequest {
+    return {
+        paper_id: paperId,
+        selected_text: selectedText,
+        page_number: payload.pageNumber,
+        selection_type_hint: payload.selectionTypeHint || "auto",
+        context_before: payload.contextBefore,
+        context_after: payload.contextAfter,
+        target_language: payload.targetLanguage || "zh-CN",
+    };
+}
+
+async function fetchSelectionTranslation(
+    requestBody: TranslateSelectionRequest,
+    signal: AbortSignal,
+): Promise<SelectionTranslationResponse> {
+    let response: SelectionTranslationResponse | null = null;
+    for (let attempt = 1; attempt <= MAX_RETRY_ATTEMPTS; attempt++) {
+        try {
+            response = await fetchFromApi("/api/translate/selection", {
+                method: "POST",
+                body: JSON.stringify(requestBody),
+                signal,
+            }) as SelectionTranslationResponse;
+            break;
+        } catch (error) {
+            if (error instanceof Error && error.name === "AbortError") {
+                throw error;
+            }
+            const shouldRetry = attempt < MAX_RETRY_ATTEMPTS && isTransientTranslationError(error);
+            if (!shouldRetry) {
+                throw error;
+            }
+            await new Promise((resolve) => setTimeout(resolve, 500 * attempt));
+        }
+    }
+
+    if (!response) {
+        throw new Error("Failed to translate selection.");
+    }
+    return response;
 }
 
 export function useSelectionTranslation(paperId?: string) {
@@ -38,36 +95,28 @@ export function useSelectionTranslation(paperId?: string) {
     const [isTranslating, setIsTranslating] = useState(false);
     const [translationError, setTranslationError] = useState<string | null>(null);
 
-    const cacheRef = useRef<Map<string, SelectionTranslationResponse>>(new Map());
-    const abortControllerRef = useRef<AbortController | null>(null);
+    const cacheRef = useRef(new Map<string, SelectionTranslationResponse>());
     const lastRequestRef = useRef<TranslateSelectionInput | null>(null);
+    const abortControllerRef = useRef<AbortController | null>(null);
     const inFlightFingerprintRef = useRef<string | null>(null);
     const inFlightPromiseRef = useRef<Promise<SelectionTranslationResponse | null> | null>(null);
     const latestRequestedFingerprintRef = useRef<string | null>(null);
 
-    const makeFingerprint = useCallback(
-        (payload: TranslateSelectionInput) => {
-            const normalizedText = payload.selectedText.replace(/\s+/g, " ").trim().toLowerCase();
-            const normalizedBefore = (payload.contextBefore || "")
-                .replace(/\s+/g, " ")
-                .trim()
-                .toLowerCase();
-            const normalizedAfter = (payload.contextAfter || "")
-                .replace(/\s+/g, " ")
-                .trim()
-                .toLowerCase();
-            return [
-                paperId || "",
-                normalizedText,
-                payload.pageNumber || "",
-                payload.selectionTypeHint || "auto",
-                payload.targetLanguage || "zh-CN",
-                normalizedBefore,
-                normalizedAfter,
-            ].join("|");
-        },
-        [paperId],
-    );
+    const makeFingerprint = useCallback((payload: TranslateSelectionInput) => {
+        return [
+            normalizeForKey(paperId),
+            normalizeForKey(payload.selectedText),
+            normalizeForKey(payload.pageNumber),
+            normalizeForKey(payload.selectionTypeHint || "auto"),
+            normalizeForKey(payload.targetLanguage || "zh-CN"),
+            normalizeForKey(payload.contextBefore),
+            normalizeForKey(payload.contextAfter),
+        ].join("|");
+    }, [paperId]);
+
+    const isLatestFingerprint = useCallback((fingerprint: string) => {
+        return latestRequestedFingerprintRef.current === fingerprint;
+    }, []);
 
     const cancel = useCallback(() => {
         if (abortControllerRef.current) {
@@ -75,6 +124,10 @@ export function useSelectionTranslation(paperId?: string) {
             abortControllerRef.current = null;
         }
     }, []);
+
+    useEffect(() => {
+        return () => cancel();
+    }, [cancel]);
 
     const clear = useCallback(() => {
         cancel();
@@ -98,12 +151,17 @@ export function useSelectionTranslation(paperId?: string) {
                 return null;
             }
 
-            const fingerprint = makeFingerprint(payload);
+            const normalizedPayload: TranslateSelectionInput = {
+                ...payload,
+                selectedText,
+            };
+            const fingerprint = makeFingerprint(normalizedPayload);
             latestRequestedFingerprintRef.current = fingerprint;
+
             if (!payload.force) {
                 const cached = cacheRef.current.get(fingerprint);
                 if (cached) {
-                    if (latestRequestedFingerprintRef.current === fingerprint) {
+                    if (isLatestFingerprint(fingerprint)) {
                         setTranslation(cached);
                         setTranslationError(null);
                         setIsTranslating(false);
@@ -112,8 +170,8 @@ export function useSelectionTranslation(paperId?: string) {
                 }
 
                 if (
-                    inFlightFingerprintRef.current === fingerprint &&
-                    inFlightPromiseRef.current
+                    inFlightFingerprintRef.current === fingerprint
+                    && inFlightPromiseRef.current
                 ) {
                     return inFlightPromiseRef.current;
                 }
@@ -123,98 +181,61 @@ export function useSelectionTranslation(paperId?: string) {
             const controller = new AbortController();
             abortControllerRef.current = controller;
             inFlightFingerprintRef.current = fingerprint;
-            lastRequestRef.current = payload;
+            lastRequestRef.current = normalizedPayload;
             setIsTranslating(true);
             setTranslationError(null);
+
             let didTimeout = false;
-            const timeoutId = setTimeout(() => {
+            const timeoutId = window.setTimeout(() => {
                 didTimeout = true;
                 controller.abort();
             }, TRANSLATION_TIMEOUT_MS);
 
-            const requestBody: TranslateSelectionRequest = {
-                paper_id: paperId,
-                selected_text: selectedText,
-                page_number: payload.pageNumber,
-                selection_type_hint: payload.selectionTypeHint || "auto",
-                context_before: payload.contextBefore,
-                context_after: payload.contextAfter,
-                target_language: payload.targetLanguage || "zh-CN",
-            };
-
+            const requestBody = buildRequestBody(paperId, normalizedPayload, selectedText);
             const requestPromise = (async () => {
                 try {
-                let response: SelectionTranslationResponse | null = null;
-                const maxAttempts = 2;
-
-                for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-                    try {
-                        response = await fetchFromApi("/api/translate/selection", {
-                            method: "POST",
-                            body: JSON.stringify(requestBody),
-                            signal: controller.signal,
-                        }) as SelectionTranslationResponse;
-                        break;
-                    } catch (error) {
-                        if (error instanceof Error && error.name === "AbortError") {
-                            throw error;
-                        }
-
-                        const shouldRetry = attempt < maxAttempts && isTransientTranslationError(error);
-                        if (!shouldRetry) {
-                            throw error;
-                        }
-
-                        await new Promise(resolve => setTimeout(resolve, 500 * attempt));
+                    const response = await fetchSelectionTranslation(requestBody, controller.signal);
+                    if (controller.signal.aborted) {
+                        return null;
                     }
-                }
-
-                if (!response) {
-                    throw new Error("Failed to translate selection.");
-                }
-
-                if (controller.signal.aborted) {
-                    return null;
-                }
-
-                cacheRef.current.set(fingerprint, response);
-                if (latestRequestedFingerprintRef.current === fingerprint) {
-                    setTranslation(response);
-                }
-                return response;
-            } catch (error) {
-                if (error instanceof Error && error.name === "AbortError") {
-                    if (didTimeout && latestRequestedFingerprintRef.current === fingerprint) {
-                        setTranslationError("Translation request timed out. Please retry.");
+                    cacheRef.current.set(fingerprint, response);
+                    if (isLatestFingerprint(fingerprint)) {
+                        setTranslation(response);
+                        setTranslationError(null);
+                    }
+                    return response;
+                } catch (error) {
+                    if (error instanceof Error && error.name === "AbortError") {
+                        if (didTimeout && isLatestFingerprint(fingerprint)) {
+                            setTranslationError("Translation request timed out. Please retry.");
+                        }
+                        return null;
+                    }
+                    if (isLatestFingerprint(fingerprint)) {
+                        setTranslationError(toErrorMessage(error, "Failed to translate selection."));
                     }
                     return null;
-                }
-                const message = error instanceof Error ? error.message : "Failed to translate selection.";
-                if (latestRequestedFingerprintRef.current === fingerprint) {
-                    setTranslationError(message);
-                }
-                return null;
-            } finally {
-                clearTimeout(timeoutId);
-                if (inFlightPromiseRef.current === requestPromise) {
-                    inFlightPromiseRef.current = null;
-                }
-                if (inFlightFingerprintRef.current === fingerprint) {
-                    inFlightFingerprintRef.current = null;
-                }
-                if (abortControllerRef.current === controller) {
-                    abortControllerRef.current = null;
-                    if (latestRequestedFingerprintRef.current === fingerprint) {
+                } finally {
+                    window.clearTimeout(timeoutId);
+                    if (inFlightPromiseRef.current === requestPromise) {
+                        inFlightPromiseRef.current = null;
+                    }
+                    if (inFlightFingerprintRef.current === fingerprint) {
+                        inFlightFingerprintRef.current = null;
+                    }
+                    if (abortControllerRef.current === controller) {
+                        abortControllerRef.current = null;
+                    }
+                    if (isLatestFingerprint(fingerprint)) {
                         setIsTranslating(false);
                     }
                 }
-            }
             })();
 
             inFlightPromiseRef.current = requestPromise;
             return requestPromise;
         },
-        [cancel, makeFingerprint, paperId],
+        [cancel, isLatestFingerprint, makeFingerprint, paperId],
     );
 
     const retryLast = useCallback(async () => {

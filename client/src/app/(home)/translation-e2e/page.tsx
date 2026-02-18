@@ -25,7 +25,7 @@ export default function TranslationE2EPage() {
     );
     const [isAnnotating, setIsAnnotating] = useState(false);
     const [isSelectionInProgress, setIsSelectionInProgress] = useState(false);
-    const [highlights, setHighlights] = useState<PaperHighlight[]>([]);
+    const [, setHighlights] = useState<PaperHighlight[]>([]);
     const [activeHighlight, setActiveHighlight] = useState<PaperHighlight | null>(null);
     const [userMessageReferences, setUserMessageReferences] = useState<string[]>([]);
 
@@ -150,8 +150,6 @@ export default function TranslationE2EPage() {
                 setSelectedText={setSelectedText}
                 setTooltipPosition={setTooltipPosition}
                 setIsAnnotating={setIsAnnotating}
-                highlights={highlights}
-                setHighlights={setHighlights}
                 isSelectionInProgress={isSelectionInProgress}
                 isHighlightInteraction={false}
                 activeHighlight={activeHighlight}
