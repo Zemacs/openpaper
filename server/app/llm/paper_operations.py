@@ -1,6 +1,8 @@
+import asyncio
 import logging
 import re
 import uuid
+from functools import partial
 from typing import AsyncGenerator, Literal, Optional, Sequence, Union
 
 import requests as http_requests
@@ -180,8 +182,10 @@ class PaperOperations(BaseLLMClient):
                 f"Could not generate presigned URL for paper with ID {paper_id}."
             )
 
-        # Retrieve and encode the PDF bytes
-        response = http_requests.get(signed_url, timeout=60)
+        # Retrieve PDF bytes off the event loop to avoid blocking
+        response = await asyncio.to_thread(
+            partial(http_requests.get, signed_url, timeout=60)
+        )
         response.raise_for_status()
         pdf_bytes = response.content
 
