@@ -51,7 +51,7 @@ if DEV_AUTO_LOGIN:
         "as the dev user. Do NOT use this in production."
     )
 
-DEV_USER_EMAIL = os.getenv("DEV_USER_EMAIL", "dev@localhost")
+DEV_USER_EMAIL = os.getenv("DEV_USER_EMAIL", "dev@openpaper.local")
 DEV_USER_NAME = os.getenv("DEV_USER_NAME", "Dev User")
 
 # Cache dev user with TTL to avoid DB lookups on every request
@@ -68,15 +68,21 @@ def _get_or_create_dev_user(db: Session) -> CurrentUser:
     if _dev_user_cache is not None and (now - _dev_user_cache_ts) < _DEV_CACHE_TTL_SECONDS:
         return _dev_user_cache
 
-    # Find or create user
+    # Find or create user (handle race condition where another request already created it)
     db_user = user_crud.get_by_email(db, email=DEV_USER_EMAIL)
     if not db_user:
-        db_user = user_crud.create_email_user(db, email=DEV_USER_EMAIL, name=DEV_USER_NAME)
-        db_user.is_admin = True  # type: ignore
-        db_user.is_email_verified = True  # type: ignore
-        db.commit()
-        db.refresh(db_user)
-        logger.info(f"Created dev user: {DEV_USER_EMAIL}")
+        try:
+            db_user = user_crud.create_email_user(db, email=DEV_USER_EMAIL, name=DEV_USER_NAME)
+            db_user.is_admin = True  # type: ignore
+            db_user.is_email_verified = True  # type: ignore
+            db.commit()
+            db.refresh(db_user)
+            logger.info(f"Created dev user: {DEV_USER_EMAIL}")
+        except Exception:
+            db.rollback()
+            db_user = user_crud.get_by_email(db, email=DEV_USER_EMAIL)
+            if not db_user:
+                raise
 
     # Ensure admin + verified
     if not db_user.is_admin or not db_user.is_email_verified:
