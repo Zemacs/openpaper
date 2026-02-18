@@ -26,6 +26,7 @@ from app.api.projects.projects_invitation_api import (
 )
 from app.api.search_api import search_router
 from app.api.subscription_api import subscription_router
+from app.api.translation_api import translation_router
 from app.api.webhook_api import webhook_router
 from app.database.admin import setup_admin
 from dotenv import load_dotenv
@@ -86,6 +87,7 @@ app.include_router(
 app.include_router(webhook_router, prefix="/api/webhooks")  # Webhook routes
 app.include_router(onboarding_router, prefix="/api/onboarding")
 app.include_router(discover_router, prefix="/api/discover")
+app.include_router(translation_router, prefix="/api/translate")
 
 setup_admin(app)  # Setup admin interface
 

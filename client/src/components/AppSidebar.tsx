@@ -233,6 +233,14 @@ const UsageLimitCard = ({
                     total={subscription.limits.chat_credits_weekly}
                     percentage={getChatCreditUsagePercentage(subscription)}
                 />
+                {(typeof subscription.usage.chat_message_credits_used === 'number'
+                    || typeof subscription.usage.chat_translation_credits_used === 'number') && (
+                    <div className="text-xs text-muted-foreground -mt-3 px-1">
+                        Message: {subscription.usage.chat_message_credits_used ?? 0}
+                        {" · "}
+                        Translation: {subscription.usage.chat_translation_credits_used ?? 0}
+                    </div>
+                )}
 
                 <UsageItem
                     label="Weekly Audio Overviews"

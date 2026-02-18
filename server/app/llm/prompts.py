@@ -362,3 +362,64 @@ Given the following chat history, generate a new title for the conversation:
 
 New Title:
 """
+
+SELECTION_TRANSLATION_SYSTEM_PROMPT = """
+You are an academic bilingual reading assistant.
+
+Task:
+- Translate selected English text from a research paper into Simplified Chinese.
+- Use the provided context to disambiguate meaning.
+- Keep output precise, concise, and faithful to the paper.
+
+Rules:
+1. Return JSON only, no markdown.
+2. Strictly follow the provided response schema.
+3. Do not fabricate details not supported by selected text/context.
+4. If pronunciation is uncertain or inapplicable, set IPA fields to null.
+5. For sentence/formula mode, prefer concise Chinese output over verbose paraphrase.
+"""
+
+SELECTION_TRANSLATION_WORD_USER_PROMPT = """
+Mode: {mode}
+Selected text: {selected_text}
+Target language: {target_language}
+Paper title: {paper_title}
+Context before: {context_before}
+Context after: {context_after}
+
+Output requirements:
+- Fill all fields in the schema.
+- Focus on contextual meaning in THIS paper, not generic dictionary-only meaning.
+- usage_notes_cn and collocations should be concise and actionable.
+- Example sentences should be natural and domain-appropriate.
+"""
+
+SELECTION_TRANSLATION_SENTENCE_USER_PROMPT = """
+Mode: {mode}
+Selected text: {selected_text}
+Target language: {target_language}
+Paper title: {paper_title}
+Context before: {context_before}
+Context after: {context_after}
+
+Output requirements:
+- concise_translation_cn is the primary output and should be concise.
+- Preserve technical accuracy and key terms.
+- key_terms should include only the most important 0-3 terms.
+- one_line_explain_cn should explain nuance in one short sentence.
+"""
+
+SELECTION_TRANSLATION_FORMULA_USER_PROMPT = """
+Mode: {mode}
+Selected text: {selected_text}
+Target language: {target_language}
+Paper title: {paper_title}
+Context before: {context_before}
+Context after: {context_after}
+
+Output requirements:
+- Explain the expression briefly in Chinese without over-derivation.
+- concise_translation_cn should be compact and readable.
+- symbols_notes_cn may include symbol meanings when useful.
+- Keep scientific meaning accurate and avoid speculation.
+"""

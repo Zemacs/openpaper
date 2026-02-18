@@ -1,0 +1,129 @@
+import asyncio
+import logging
+import os
+
+from app.auth.dependencies import get_required_user
+from app.database.database import get_db
+from app.database.telemetry import track_event
+from app.helpers.subscription_limits import can_user_run_chat
+from app.llm.translation_operations import (
+    TranslationInputError,
+    translation_operations,
+)
+from app.llm.utils import (
+    format_llm_error_for_client,
+    get_llm_error_category,
+    is_transient_llm_error,
+)
+from app.schemas.translation import (
+    TranslateSelectionRequest,
+    TranslateSelectionResponse,
+)
+from app.schemas.user import CurrentUser
+from fastapi import APIRouter, Depends, HTTPException
+from fastapi.concurrency import run_in_threadpool
+from sqlalchemy.orm import Session
+
+logger = logging.getLogger(__name__)
+
+translation_router = APIRouter()
+MAX_CONTEXT_CHARS = 300
+TRANSLATION_TIMEOUT_SECONDS = int(os.getenv("TRANSLATION_TIMEOUT_SECONDS", "12"))
+
+
+@translation_router.post("/selection", response_model=TranslateSelectionResponse)
+async def translate_selection(
+    request: TranslateSelectionRequest,
+    db: Session = Depends(get_db),
+    current_user: CurrentUser = Depends(get_required_user),
+) -> TranslateSelectionResponse:
+    selected_text = request.selected_text.strip()
+    if not selected_text:
+        raise HTTPException(status_code=400, detail="selected_text cannot be empty.")
+
+    context_before = (request.context_before or "").strip()
+    context_after = (request.context_after or "").strip()
+    if len(context_before) > MAX_CONTEXT_CHARS:
+        context_before = context_before[-MAX_CONTEXT_CHARS:]
+    if len(context_after) > MAX_CONTEXT_CHARS:
+        context_after = context_after[:MAX_CONTEXT_CHARS]
+
+    estimated_chars = len(selected_text)
+    if context_before:
+        estimated_chars += len(context_before)
+    if context_after:
+        estimated_chars += len(context_after)
+    # Reserve output budget to avoid crossing credit limit after generation.
+    estimated_chars += 400
+
+    track_event(
+        "selection_translation_requested",
+        properties={
+            "paper_id": request.paper_id,
+            "selection_len": len(selected_text),
+            "selection_type_hint": request.selection_type_hint.value,
+            "target_language": request.target_language,
+        },
+        user_id=str(current_user.id),
+    )
+
+    can_chat, reason = can_user_run_chat(
+        db, current_user, estimated_chars=estimated_chars
+    )
+    if not can_chat:
+        track_event(
+            "selection_translation_quota_exceeded",
+            properties={"reason": reason},
+            user_id=str(current_user.id),
+        )
+        raise HTTPException(status_code=429, detail=reason)
+
+    try:
+        return await asyncio.wait_for(
+            run_in_threadpool(
+                translation_operations.translate_selection,
+                db=db,
+                current_user=current_user,
+                paper_id=request.paper_id,
+                selected_text=selected_text,
+                page_number=request.page_number,
+                selection_type_hint=request.selection_type_hint,
+                context_before=context_before or None,
+                context_after=context_after or None,
+                target_language=request.target_language,
+            ),
+            timeout=TRANSLATION_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        logger.error(
+            "Selection translation timed out after %ss", TRANSLATION_TIMEOUT_SECONDS
+        )
+        track_event(
+            "selection_translation_timeout",
+            properties={"timeout_seconds": TRANSLATION_TIMEOUT_SECONDS},
+            user_id=str(current_user.id),
+        )
+        raise HTTPException(
+            status_code=504,
+            detail="Translation request timed out. Please retry with a shorter selection.",
+        )
+    except TranslationInputError as e:
+        logger.warning(f"Translation request rejected: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Failed to translate selection: {e}", exc_info=True)
+        category = get_llm_error_category(e)
+        track_event(
+            "selection_translation_failed",
+            properties={"error": str(e), "category": category},
+            user_id=str(current_user.id),
+        )
+        if is_transient_llm_error(e):
+            raise HTTPException(
+                status_code=503,
+                detail=format_llm_error_for_client(e),
+            )
+        raise HTTPException(
+            status_code=502,
+            detail=format_llm_error_for_client(e),
+        )

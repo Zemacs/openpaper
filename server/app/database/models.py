@@ -176,6 +176,9 @@ class User(Base):
     invitations = relationship(
         "ProjectRoleInvitation", back_populates="inviter", cascade="all, delete-orphan"
     )
+    translation_usage_logs = relationship(
+        "TranslationUsageLog", back_populates="user", cascade="all, delete-orphan"
+    )
 
 
 class Session(Base):
@@ -847,6 +850,32 @@ class DiscoverSearch(Base):
     results = Column(JSONB, nullable=True)
 
     user = relationship("User")
+
+
+class TranslationUsageLog(Base):
+    __tablename__ = "translation_usage_logs"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    paper_id = Column(
+        UUID(as_uuid=True), ForeignKey("papers.id", ondelete="CASCADE"), nullable=False
+    )
+    mode = Column(String, nullable=False)
+    source_chars = Column(Integer, nullable=False, default=0)
+    context_chars = Column(Integer, nullable=False, default=0)
+    output_chars = Column(Integer, nullable=False, default=0)
+    credits_used = Column(Integer, nullable=False, default=0)
+    cached = Column(Boolean, nullable=False, default=False)
+
+    user = relationship("User", back_populates="translation_usage_logs")
+    paper = relationship("Paper")
+
+    __table_args__ = (
+        Index("ix_translation_usage_logs_user_id", "user_id"),
+        Index("ix_translation_usage_logs_created_at", "created_at"),
+    )
 
 
 class DataTableExtractionJob(Base):

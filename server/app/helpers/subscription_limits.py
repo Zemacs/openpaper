@@ -17,6 +17,7 @@ from app.database.crud.paper_crud import paper_crud
 from app.database.crud.projects.project_crud import project_crud
 from app.database.crud.projects.project_data_table_crud import data_table_job_crud
 from app.database.crud.subscription_crud import subscription_crud
+from app.database.crud.translation_usage_crud import translation_usage_crud
 from app.database.models import SubscriptionPlan, SubscriptionStatus
 from app.database.telemetry import track_event
 from app.schemas.user import CurrentUser
@@ -350,11 +351,60 @@ def can_user_run_discover_search(
     return True, None
 
 
+def can_user_run_chat(
+    db: Session, user: CurrentUser, estimated_chars: int = 0
+) -> tuple[bool, Optional[str]]:
+    """
+    Check if a user can run chat-like requests based on weekly chat credits.
+
+    Returns:
+        tuple: (can_chat: bool, error_message: Optional[str])
+    """
+    plan = get_user_subscription_plan(db, user)
+    limits = get_plan_limits(plan)
+
+    chat_credits_allowed = limits[CHAT_CREDITS_KEY]
+    chat_credits_used = get_user_chat_credits_used_this_week(db, user)
+    estimated_credits = max(0, int(estimated_chars / 5))
+    projected_usage = chat_credits_used + estimated_credits
+
+    if chat_credits_allowed == float("inf"):
+        return True, None
+
+    if projected_usage >= chat_credits_allowed:
+        track_event(
+            "action_blocked_limit_reached",
+            user_id=str(user.id),
+            properties={
+                "metric": "chat_credits",
+                "usage": chat_credits_used,
+                "estimated_credits": estimated_credits,
+                "projected_usage": projected_usage,
+                "limit": chat_credits_allowed,
+                "plan": plan.value,
+            },
+        )
+        plan_name = {
+            SubscriptionPlan.BASIC: "Basic",
+            SubscriptionPlan.RESEARCHER: "Researcher",
+        }.get(plan, "Basic")
+        return (
+            False,
+            f"You have reached your chat limit for this week on the {plan_name} plan. Please upgrade to continue.",
+        )
+
+    return True, None
+
+
 def get_user_chat_credits_used_this_week(db: Session, user: CurrentUser) -> int:
     """
     Get the number of chat credits used by the user today.
     """
-    return message_crud.get_chat_credits_used_this_week(db, current_user=user)
+    message_credits = message_crud.get_chat_credits_used_this_week(db, current_user=user)
+    translation_credits = translation_usage_crud.get_translation_credits_used_this_week(
+        db, current_user=user
+    )
+    return int(message_credits) + int(translation_credits)
 
 
 def get_user_audio_overviews_used_this_month(db: Session, user: CurrentUser) -> int:
@@ -381,6 +431,14 @@ def get_user_usage_info(db: Session, user: CurrentUser) -> Dict:
 
     chat_credits_allowed = limits[CHAT_CREDITS_KEY]
     chat_credits_used = get_user_chat_credits_used_this_week(db, user)
+    message_credits_used = message_crud.get_chat_credits_used_this_week(
+        db, current_user=user
+    )
+    translation_credits_used = (
+        translation_usage_crud.get_translation_credits_used_this_week(
+            db, current_user=user
+        )
+    )
 
     audio_overviews_allowed = limits[AUDIO_OVERVIEWS_KEY]
     audio_overviews_used_this_month = get_user_audio_overviews_used_this_month(db, user)
@@ -570,6 +628,8 @@ def get_user_usage_info(db: Session, user: CurrentUser) -> Dict:
             "knowledge_base_size": total_size,
             "knowledge_base_size_remaining": knowledge_base_remaining,
             "chat_credits_used": chat_credits_used,
+            "chat_message_credits_used": int(message_credits_used),
+            "chat_translation_credits_used": int(translation_credits_used),
             "chat_credits_remaining": chat_credits_remaining,
             "audio_overviews_used": audio_overviews_used_this_month,
             "audio_overviews_remaining": audio_overviews_remaining,

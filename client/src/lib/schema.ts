@@ -83,6 +83,69 @@ export interface PaperHighlightAnnotation {
     created_at: string;
 }
 
+export type SelectionTypeHint = 'auto' | 'word' | 'term' | 'sentence' | 'formula';
+export type TranslationMode = 'word' | 'term' | 'sentence' | 'formula';
+
+export interface TranslateSelectionRequest {
+    paper_id: string;
+    selected_text: string;
+    page_number?: number;
+    selection_type_hint?: SelectionTypeHint;
+    context_before?: string;
+    context_after?: string;
+    target_language?: string;
+}
+
+export interface KeyTermPair {
+    en: string;
+    cn: string;
+}
+
+export interface WordTranslationResult {
+    ipa_us: string | null;
+    ipa_uk: string | null;
+    pos: string | null;
+    primary_translation_cn: string;
+    context_translation_cn: string;
+    meaning_explainer_cn: string;
+    usage_notes_cn: string[];
+    collocations: string[];
+    example_context_en: string | null;
+    example_context_cn: string | null;
+    example_general_en: string | null;
+    example_general_cn: string | null;
+}
+
+export interface SentenceTranslationResult {
+    concise_translation_cn: string;
+    literal_translation_cn: string | null;
+    key_terms: KeyTermPair[];
+    one_line_explain_cn: string | null;
+}
+
+export interface FormulaTranslationResult {
+    concise_translation_cn: string;
+    formula_explain_cn: string;
+    symbols_notes_cn: string[];
+    one_line_takeaway_cn: string | null;
+}
+
+export interface SelectionTranslationMeta {
+    confidence: number;
+    context_relevance_score: number;
+    cached: boolean;
+    latency_ms: number;
+}
+
+export interface SelectionTranslationResponse {
+    mode: TranslationMode;
+    detected_mode: TranslationMode;
+    source_text: string;
+    target_language: string;
+    result: WordTranslationResult | SentenceTranslationResult | FormulaTranslationResult;
+    meta: SelectionTranslationMeta;
+}
+
 export interface Reference {
     citations: Citation[];
 }
@@ -466,6 +529,8 @@ export interface SubscriptionUsage {
     knowledge_base_size: number;
     knowledge_base_size_remaining: number;
     chat_credits_used: number;
+    chat_message_credits_used?: number;
+    chat_translation_credits_used?: number;
     chat_credits_remaining: number;
     audio_overviews_used: number;
     audio_overviews_remaining: number;
