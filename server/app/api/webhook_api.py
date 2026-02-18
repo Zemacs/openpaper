@@ -119,7 +119,8 @@ class PdfProcessingWebhookData(BaseModel):
 
     task_id: str
     status: str
-    result: PDFProcessingResult
+    result: Optional[PDFProcessingResult] = None
+    error: Optional[str] = None
 
 
 @webhook_router.post("/paper-processing/{job_id}")
@@ -155,7 +156,7 @@ async def handle_paper_processing_webhook(
     result = webhook_data.result
 
     try:
-        if status == "completed" and result.success:
+        if status == "completed" and result and result.success:
             # Processing was successful
             metadata = result.metadata
             file_url = result.file_url
@@ -167,25 +168,6 @@ async def handle_paper_processing_webhook(
                     db=db, job_id=job_id, job_user=job_user, reason="Missing file_url"
                 )
                 return {"status": "webhook processed - failed due to missing file_url"}
-
-            if not metadata:
-                logger.error(f"No metadata in webhook result for job {job_id}")
-                handle_failed_upload(
-                    db=db, job_id=job_id, job_user=job_user, reason="Missing metadata"
-                )
-                return {"status": "webhook processed - failed due to missing metadata"}
-
-            if not result.raw_content:
-                logger.error(f"No raw_content in webhook result for job {job_id}")
-                handle_failed_upload(
-                    db=db,
-                    job_id=job_id,
-                    job_user=job_user,
-                    reason="Missing raw_content",
-                )
-                return {
-                    "status": "webhook processed - failed due to missing raw_content"
-                }
 
             if not metadata or not metadata.title:
                 logger.error(f"No metadata in webhook result for job {job_id}")
@@ -227,8 +209,12 @@ async def handle_paper_processing_webhook(
                     title=metadata.title,
                     authors=metadata.authors,
                     abstract=metadata.abstract,
-                    summary="",
-                    summary_citations=[],
+                    summary=metadata.summary or "",
+                    summary_citations=(
+                        [c.model_dump() for c in metadata.summary_citations]
+                        if metadata.summary_citations
+                        else []
+                    ),
                     keywords=metadata.keywords,
                     institutions=metadata.institutions,
                     publish_date=publish_date,
@@ -336,7 +322,10 @@ async def handle_paper_processing_webhook(
 
         else:
             # Processing failed
-            error_message = result.error if result.error else "Unknown error"
+            error_message = (
+                result.error if result and result.error
+                else webhook_data.error or "Unknown error"
+            )
             handle_failed_upload(
                 db=db, job_id=job_id, job_user=job_user, reason=error_message
             )
@@ -366,7 +355,7 @@ class DataTableProcessingResultWebhookData(BaseModel):
 
     task_id: str
     status: str
-    result: DataTableResult
+    result: Optional[DataTableResult] = None
     error: Optional[str] = None
 
 
@@ -388,7 +377,7 @@ async def handle_data_table_processing_webhook(
     error = webhook_data.error
 
     try:
-        if status == "completed" and result.success:
+        if status == "completed" and result and result.success:
             # Processing was successful
             logger.info(
                 f"Data table processing completed for job {job_id}, "
@@ -506,6 +495,6 @@ async def handle_data_table_processing_webhook(
         "status": "data table webhook processed",
         "job_id": job_id,
         "task_id": task_id,
-        "success": result.success,
-        "rows_count": len(result.rows),
+        "success": result.success if result else False,
+        "rows_count": len(result.rows) if result else 0,
     }

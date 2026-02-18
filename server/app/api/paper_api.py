@@ -107,11 +107,6 @@ async def get_active_paper_ids(
     papers: List[Paper] = paper_crud.get_multi_uploads_completed(
         db, user=current_user, status=PaperStatus.reading
     )
-    if not papers:
-        return JSONResponse(
-            status_code=404, content={"message": "No active papers found"}
-        )
-
     data = [
         {
             "id": str(paper.id),

@@ -147,7 +147,13 @@ def upload_and_process_file(
             webhook_payload["webhook_error"] = str(e)
 
         logger.info(f"Task {task_id} completed successfully")
-        return webhook_payload
+        # Keep Celery result payload compact: full processing data is delivered via webhook.
+        return {
+            "task_id": task_id,
+            "status": webhook_payload["status"],
+            "webhook_sent": "webhook_error" not in webhook_payload,
+            "error": webhook_payload.get("error"),
+        }
 
     except Exception as exc:
         logger.error(f"Task {task_id} failed: {exc}", exc_info=True)
