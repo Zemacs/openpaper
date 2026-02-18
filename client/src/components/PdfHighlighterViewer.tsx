@@ -168,6 +168,17 @@ export function PdfHighlighterViewer(props: PdfHighlighterViewerProps) {
 		}
 	}, [scale]);
 
+	// Sync pdfReady and numPages from pdfDocumentRef (deferred from render callback to avoid setState-during-render)
+	useEffect(() => {
+		const doc = pdfDocumentRef.current;
+		if (doc && !pdfReady) {
+			setPdfReady(true);
+		}
+		if (doc && doc.numPages !== numPages) {
+			setNumPages(doc.numPages);
+		}
+	});
+
 	// Re-apply scale after container resizes to override the library's stale ResizeObserver
 	// (the library's ResizeObserver captures a stale pdfScaleValue due to missing dependency)
 	useEffect(() => {
@@ -758,17 +769,8 @@ export function PdfHighlighterViewer(props: PdfHighlighterViewerProps) {
 					)}
 				>
 					{(pdfDocument) => {
-						// Store PDF document ref for text extraction
-						if (pdfDocumentRef.current !== pdfDocument) {
-							pdfDocumentRef.current = pdfDocument;
-							if (!pdfReady) {
-								setPdfReady(true);
-							}
-						}
-						// Set numPages when document loads
-						if (pdfDocument.numPages !== numPages) {
-							setNumPages(pdfDocument.numPages);
-						}
+						// Store PDF document ref (no state updates here to avoid setState-during-render)
+						pdfDocumentRef.current = pdfDocument;
 
 						return (
 							<PdfHighlighter

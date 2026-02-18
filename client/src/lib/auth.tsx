@@ -28,14 +28,7 @@ const AUTH_STORAGE_KEY = 'auth_user';
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
-	const [user, setUser] = useState<User | null>(() => {
-		// Initialize from localStorage if in browser environment
-		if (typeof window !== 'undefined') {
-			const storedUser = localStorage.getItem(AUTH_STORAGE_KEY);
-			return storedUser ? JSON.parse(storedUser) : null;
-		}
-		return null;
-	});
+	const [user, setUser] = useState<User | null>(null);
 	const [loading, setLoading] = useState(true);
 	const [error, setError] = useState<string | null>(null);
 
@@ -50,6 +43,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
 	// Check if user is logged in
 	useEffect(() => {
+		// Quick restore from localStorage before API verification
+		try {
+			const storedUser = localStorage.getItem(AUTH_STORAGE_KEY);
+			if (storedUser) {
+				setUser(JSON.parse(storedUser));
+			}
+		} catch {
+			localStorage.removeItem(AUTH_STORAGE_KEY);
+		}
+
 		async function checkAuth() {
 			try {
 				const response = await fetchFromApi('/api/auth/me');
