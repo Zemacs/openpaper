@@ -23,13 +23,13 @@ from app.schemas.user import CurrentUser
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from sqlalchemy.orm import Session
 
+logger = logging.getLogger(__name__)
+
 STRIPE_API_KEY = os.getenv("STRIPE_API_KEY")
 if not STRIPE_API_KEY:
-    raise ValueError("STRIPE_API_KEY environment variable is not set")
+    logger.warning("STRIPE_API_KEY not set — subscription endpoints will be unavailable")
 
 STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
-
-logger = logging.getLogger(__name__)
 
 MONTHLY_PRICE_ID = os.getenv("STRIPE_MONTHLY_PRICE_ID")
 YEARLY_PRICE_ID = os.getenv("STRIPE_YEARLY_PRICE_ID")
