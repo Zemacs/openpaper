@@ -1,0 +1,86 @@
+name: nightly-translation-e2e
+
+on:
+  schedule:
+    # Daily at 03:17 UTC
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      run_live_provider:
+        description: "Run live provider smoke test"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly-translation-e2e
+  cancel-in-progress: false
+
+jobs:
+  translation-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: annotated-paper
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d annotated-paper"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/annotated-paper
+      DEV_AUTO_LOGIN: "true"
+      DEV_USER_EMAIL: dev@openpaper.local
+      DEV_USER_NAME: Dev User
+      ENV: development
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install server dependencies
+        working-directory: server
+        run: uv sync --frozen
+
+      - name: Apply DB migrations
+        working-directory: server
+        run: uv run alembic upgrade head
+
+      - name: Run deterministic translation e2e suite
+        working-directory: server
+        run: uv run python scripts/e2e_translation_feature.py
+
+      - name: Validate GEMINI key for live smoke
+        if: ${{ github.event_name == 'schedule' || github.event.inputs.run_live_provider == 'true' }}
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          if [ -z "${GEMINI_API_KEY}" ]; then
+            echo "GEMINI_API_KEY is required for live provider smoke tests."
+            exit 1
+          fi
+
+      - name: Run live provider translation smoke
+        if: ${{ github.event_name == 'schedule' || github.event.inputs.run_live_provider == 'true' }}
+        working-directory: server
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          E2E_LIVE_TRANSLATION: "true"
+        run: uv run python scripts/e2e_translation_live_provider.py

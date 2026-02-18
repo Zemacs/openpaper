@@ -21,8 +21,12 @@ client/coverage
 
 # next.js
 client/.next/
+client/.next-e2e/
+client/.next.bad.*/
 client/out/
 client/public/blog-latest.json
+client/test-results/
+client/playwright-report/
 
 # production
 client/build
