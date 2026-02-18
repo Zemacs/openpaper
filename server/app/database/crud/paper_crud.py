@@ -316,19 +316,32 @@ class PaperCRUD(CRUDBase["Paper", PaperCreate, PaperUpdate]):
         for ai_highlight in extract_metadata.highlights:
             offsets = find_offsets(ai_highlight.text, raw_file.raw_content)
 
+            start_offset, end_offset = offsets
             page_number = None
-            if offsets and raw_file.page_offsets:
+            if (
+                start_offset >= 0
+                and end_offset > start_offset
+                and raw_file.page_offsets
+            ):
                 # Get the starting page number from the offsets
                 page_number = get_start_page_from_offset(
-                    raw_file.page_offsets, offsets[0]
+                    raw_file.page_offsets, start_offset
                 )
+            elif start_offset < 0 or end_offset <= start_offset:
+                # Keep the highlight, but avoid writing misleading offsets/page hints.
+                logger.warning(
+                    f"Unreliable AI highlight offsets for paper {paper_id}; storing without offsets. "
+                    f"Highlight preview: {ai_highlight.text[:120]!r}"
+                )
+                start_offset = None
+                end_offset = None
 
             new_ai_highlight_obj = HighlightCreate(
                 paper_id=uuid.UUID(paper_id),
                 raw_text=ai_highlight.text,
                 type=ai_highlight.type,
-                start_offset=offsets[0],
-                end_offset=offsets[1],
+                start_offset=start_offset,
+                end_offset=end_offset,
                 page_number=page_number,
                 role=RoleType.ASSISTANT,
             )

@@ -135,6 +135,8 @@ export default function PaperView() {
     const [toolset, setToolset] = useState(PaperToolset);
     const initialRsfRef = useRef<string | null>(null);
     const hasInitializedRsf = useRef(false);
+    const citationSearchCleanupTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const citationUiCleanupTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
     // Capture the initial rsf from URL on first render
     useEffect(() => {
@@ -265,45 +267,87 @@ export default function PaperView() {
         }
     };
 
+    const normalizeCitationSearchTerm = useCallback((rawText: string): string => {
+        let normalized = rawText.replace(/^\[\^(\d+|[a-zA-Z]+)\]/, '').trim();
+
+        if ((normalized.startsWith('"') && normalized.endsWith('"')) ||
+            (normalized.startsWith("'") && normalized.endsWith("'"))) {
+            normalized = normalized.substring(1, normalized.length - 1);
+        }
+
+        return normalized.replace(/\s+/g, ' ').trim();
+    }, []);
+
+    const scheduleCitationUiReset = useCallback(() => {
+        if (citationUiCleanupTimerRef.current) {
+            clearTimeout(citationUiCleanupTimerRef.current);
+        }
+
+        citationUiCleanupTimerRef.current = setTimeout(() => {
+            setActiveCitationKey(null);
+            setActiveCitationMessageIndex(null);
+        }, 3000);
+    }, []);
+
+    const triggerCitationSearch = useCallback((rawTerm: string) => {
+        const normalizedTerm = normalizeCitationSearchTerm(rawTerm);
+        if (!normalizedTerm) return;
+
+        // Ensure citation navigation shows search overlay instead of suppressing it
+        setActiveHighlight(null);
+
+        if (citationSearchCleanupTimerRef.current) {
+            clearTimeout(citationSearchCleanupTimerRef.current);
+        }
+
+        // Force re-run even if user clicks the same citation repeatedly
+        setExplicitSearchTerm(undefined);
+        requestAnimationFrame(() => {
+            setExplicitSearchTerm(normalizedTerm);
+        });
+
+        // Keep citation highlight temporary
+        citationSearchCleanupTimerRef.current = setTimeout(() => {
+            setExplicitSearchTerm(undefined);
+        }, 4500);
+    }, [normalizeCitationSearchTerm]);
     // Add this function to handle citation clicks
     const handleCitationClick = useCallback((key: string, messageIndex: number) => {
         setActiveCitationKey(key);
         setActiveCitationMessageIndex(messageIndex);
 
-        // Scroll to the citation
-        const element = document.getElementById(`citation-${key}-${messageIndex}`);
-        if (element) {
-
-            const refValueElement = document.getElementById(`citation-ref-${key}-${messageIndex}`);
-            if (refValueElement) {
-                const refValueText = refValueElement.innerText;
-                let searchTerm = refValueText.replace(/^\[\^(\d+|[a-zA-Z]+)\]/, '').trim();
-
-                // Only remove quotes if the text is actually wrapped in quotes
-                if ((searchTerm.startsWith('"') && searchTerm.endsWith('"')) ||
-                    (searchTerm.startsWith("'") && searchTerm.endsWith("'"))) {
-                    searchTerm = searchTerm.substring(1, searchTerm.length - 1);
-                }
-                setExplicitSearchTerm(searchTerm);
-            }
+        const refValueElement = document.getElementById(`citation-ref-${key}-${messageIndex}`);
+        if (refValueElement) {
+            triggerCitationSearch(refValueElement.innerText);
         }
 
-        // Clear the highlight after a few seconds
-        setTimeout(() => setActiveCitationKey(null), 3000);
-    }, []);
-
+        scheduleCitationUiReset();
+    }, [scheduleCitationUiReset, triggerCitationSearch]);
     const handleCitationClickFromSummary = useCallback((citationKey: string, messageIndex: number) => {
-        const citationIndex = parseInt(citationKey);
+        const citationIndex = parseInt(citationKey, 10);
         setActiveCitationKey(citationKey);
         setActiveCitationMessageIndex(messageIndex);
 
         // Look up the citations terms from the citationKey
         const citationMatch = paperData?.summary_citations?.find(c => c.index === citationIndex);
-        setExplicitSearchTerm(citationMatch ? citationMatch.text : citationKey);
+        if (citationMatch?.text) {
+            triggerCitationSearch(citationMatch.text);
+        }
 
-        // Clear the highlight after a few seconds
-        setTimeout(() => setActiveCitationKey(null), 3000);
-    }, [paperData?.summary_citations]);
+        scheduleCitationUiReset();
+    }, [paperData?.summary_citations, scheduleCitationUiReset, triggerCitationSearch]);
+
+    useEffect(() => {
+        return () => {
+            if (citationSearchCleanupTimerRef.current) {
+                clearTimeout(citationSearchCleanupTimerRef.current);
+            }
+            if (citationUiCleanupTimerRef.current) {
+                clearTimeout(citationUiCleanupTimerRef.current);
+            }
+        };
+    }, []);
+
 
     const handleHighlightClick = useCallback((highlight: PaperHighlight) => {
         setActiveHighlight(highlight);
