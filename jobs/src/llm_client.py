@@ -1,30 +1,35 @@
 """
 Simplified LLM client for metadata extraction.
 """
+
+import asyncio
+import io
 import json
 import logging
 import os
-import re
-import io
-import asyncio
 import random
+import re
+from typing import Any, Callable, Dict, List, Optional, Type, TypeVar
+
 import httpx
 from google import genai
 from google.genai import types
 from google.genai.errors import APIError, ClientError, ServerError
-from typing import Any, Dict, List, Optional, Type, TypeVar, Callable
+from pydantic import BaseModel, ConfigDict, Field, create_model
 
-from pydantic import BaseModel, create_model, Field, ConfigDict
-
-from src.prompts import EXTRACT_COLS_INSTRUCTION, SYSTEM_INSTRUCTIONS_CACHE, EXTRACT_METADATA_PROMPT_TEMPLATE
+from src.prompts import (
+    EXTRACT_COLS_INSTRUCTION,
+    EXTRACT_METADATA_PROMPT_TEMPLATE,
+    SYSTEM_INSTRUCTIONS_CACHE,
+)
 from src.schemas import (
-    DataTableRow,
-    PaperMetadataExtraction,
-    TitleAuthorsAbstract,
-    InstitutionsKeywords,
-    SummaryAndCitations,
-    Highlights,
     DataTableCellValue,
+    DataTableRow,
+    Highlights,
+    InstitutionsKeywords,
+    PaperMetadataExtraction,
+    SummaryAndCitations,
+    TitleAuthorsAbstract,
 )
 from src.utils import retry_llm_operation, time_it
 
@@ -40,7 +45,6 @@ T = TypeVar("T", bound=BaseModel)
 
 
 class JSONParser:
-
     @staticmethod
     def validate_and_extract_json(json_data: str) -> dict:
         """Extract and validate JSON data from various formats"""
@@ -113,15 +117,15 @@ class AsyncLLMClient:
             model=self.default_model,
             config=types.CreateCachedContentConfig(
                 contents=types.Content(
-                    role='user',
+                    role="user",
                     parts=[
                         types.Part.from_text(text=cache_content),
-                        types.Part.from_text(text=SYSTEM_INSTRUCTIONS_CACHE)
-                    ]
+                        types.Part.from_text(text=SYSTEM_INSTRUCTIONS_CACHE),
+                    ],
                 ),
                 display_name="Paper Metadata Cache",
-                ttl='3600s'
-            )
+                ttl="3600s",
+            ),
         )
 
         if cached_content and cached_content.name:
@@ -148,15 +152,15 @@ class AsyncLLMClient:
             str: The cache key for the stored file.
         """
         # Read the file content
-        with open(file_path, 'rb') as f:
+        with open(file_path, "rb") as f:
             file_content = f.read()
 
         doc_io = io.BytesIO(file_content)
         document = await client.aio.files.upload(
             file=doc_io,
             config=types.UploadFileConfig(
-                mime_type='application/pdf',
-            )
+                mime_type="application/pdf",
+            ),
         )
 
         cached_content = await client.aio.caches.create(
@@ -164,8 +168,8 @@ class AsyncLLMClient:
             config=types.CreateCachedContentConfig(
                 contents=document,
                 display_name="Paper Metadata Cache",
-                ttl='3600s',
-                system_instruction=system_instructions or SYSTEM_INSTRUCTIONS_CACHE
+                ttl="3600s",
+                system_instruction=system_instructions or SYSTEM_INSTRUCTIONS_CACHE,
             ),
         )
 
@@ -211,22 +215,25 @@ class AsyncLLMClient:
 
         parts = []
         if image_bytes:
-            parts.append(types.Part.from_bytes(data=image_bytes, mime_type=image_mime_type or 'image/png'))
+            parts.append(
+                types.Part.from_bytes(
+                    data=image_bytes, mime_type=image_mime_type or "image/png"
+                )
+            )
 
         if file_path:
             with open(file_path, "rb") as f:
                 file_data = f.read()
-            parts.append(types.Part.from_bytes(data=file_data, mime_type='application/pdf'))
-
+            parts.append(
+                types.Part.from_bytes(data=file_data, mime_type="application/pdf")
+            )
 
         parts.append(types.Part.from_text(text=prompt))
 
-        config = types.GenerateContentConfig(
-            cached_content=cache_key
-        )
+        config = types.GenerateContentConfig(cached_content=cache_key)
 
         if schema:
-            config.response_mime_type = 'application/json'
+            config.response_mime_type = "application/json"
             config.response_schema = schema.model_json_schema()
 
         last_exception: Optional[Exception] = None
@@ -235,15 +242,19 @@ class AsyncLLMClient:
             try:
                 response = await client.aio.models.generate_content(
                     model=model,
-                    contents=types.Content(
-                        role='user',
-                        parts=parts
-                    ),
-                    config=config
+                    contents=types.Content(role="user", parts=parts),
+                    config=config,
                 )
 
-                if response and response.text:
-                    return response.text
+                response_text = self._extract_text_from_response(response)
+                if response_text:
+                    return response_text
+
+                parsed_response = getattr(response, "parsed", None)
+                if parsed_response is not None:
+                    if isinstance(parsed_response, str):
+                        return parsed_response
+                    return json.dumps(parsed_response, ensure_ascii=False)
 
                 raise ValueError("No content generated from LLM response")
 
@@ -251,17 +262,46 @@ class AsyncLLMClient:
                 last_exception = e
                 if attempt < max_retries:
                     # Exponential backoff with jitter
-                    backoff_time = base_delay * (2 ** attempt) * (0.5 + 0.5 * random.random())
+                    backoff_time = (
+                        base_delay * (2**attempt) * (0.5 + 0.5 * random.random())
+                    )
                     logger.warning(
                         f"LLM API error (attempt {attempt + 1}/{max_retries + 1}): {e}. "
                         f"Retrying in {backoff_time:.2f}s"
                     )
                     await asyncio.sleep(backoff_time)
                 else:
-                    logger.error(f"All {max_retries + 1} attempts failed for generate_content: {e}")
+                    logger.error(
+                        f"All {max_retries + 1} attempts failed for generate_content: {e}"
+                    )
 
         # If we reach here, all retries failed
-        raise last_exception or ValueError("Failed to generate content after all retries")
+        raise last_exception or ValueError(
+            "Failed to generate content after all retries"
+        )
+
+    @staticmethod
+    def _extract_text_from_response(response: Any) -> str:
+        """
+        Extract text from Gemini response parts without relying on response.text,
+        which can emit noisy warnings when non-text parts (e.g. thought_signature)
+        are present.
+        """
+        if not response:
+            return ""
+
+        text_chunks: List[str] = []
+        candidates = getattr(response, "candidates", None) or []
+
+        for candidate in candidates:
+            content = getattr(candidate, "content", None)
+            parts = getattr(content, "parts", None) or []
+            for part in parts:
+                part_text = getattr(part, "text", None)
+                if part_text:
+                    text_chunks.append(part_text)
+
+        return "".join(text_chunks).strip()
 
 
 class PaperOperations(AsyncLLMClient):
@@ -282,7 +322,7 @@ class PaperOperations(AsyncLLMClient):
         schema: Type[BaseModel],
         status_callback: Callable[[str], None],
         client: genai.Client,
-        cache_key: Optional[str] = None
+        cache_key: Optional[str] = None,
     ) -> T:
         """
         Helper function to extract a single metadata field.
@@ -296,13 +336,14 @@ class PaperOperations(AsyncLLMClient):
         Returns:
             An instance of the provided Pydantic model.
         """
-        prompt = EXTRACT_METADATA_PROMPT_TEMPLATE.format(
-        )
+        prompt = self._build_metadata_prompt(schema)
 
         if paper_content and not cache_key:
             prompt = f"Paper Content:\n\n{paper_content}\n\n{prompt}"
 
-        response = await self.generate_content(prompt, cache_key=cache_key, schema=schema, client=client)
+        response = await self.generate_content(
+            prompt, cache_key=cache_key, schema=schema, client=client
+        )
         response_json = JSONParser.validate_and_extract_json(response)
         instance = model.model_validate(response_json)
 
@@ -314,34 +355,54 @@ class PaperOperations(AsyncLLMClient):
             institutions = getattr(instance, "institutions", [])
             first_keyword = keywords[0] if keywords else ""
             if first_keyword:
-                status_callback(
-                    f"Building on {first_keyword} context"
-                )
+                status_callback(f"Building on {first_keyword} context")
             elif institutions:
                 institutions = getattr(instance, "institutions", [])
                 first_institution = institutions[0] if institutions else ""
-                status_callback(
-                    f"Adding context from institution: {first_institution}"
-                )
+                status_callback(f"Adding context from institution: {first_institution}")
             else:
                 status_callback("Processing without keyword data")
         elif model == Highlights:
             highlights = getattr(instance, "highlights", [])
             if highlights:
-                status_callback(
-                    f"Formulated {len(highlights)} annotations"
-                )
+                status_callback(f"Formulated {len(highlights)} annotations")
             else:
                 status_callback("No annotations extracted")
         elif model == TitleAuthorsAbstract:
             title = getattr(instance, "title", "")
-            status_callback(
-                f"Reading {title if title else 'untitled paper'}"
-            )
+            status_callback(f"Reading {title if title else 'untitled paper'}")
         else:
             status_callback(f"Successfully extracted {model.__name__}")
 
         return instance
+
+    @staticmethod
+    def _build_metadata_prompt(schema: Type[BaseModel]) -> str:
+        task_specific_instructions: list[str] = []
+
+        if "summary" in schema.model_fields:
+            task_specific_instructions.append("""
+Special handling for summary extraction:
+- `summary` 字段必须使用简体中文（zh-CN），不要输出英文整段摘要。
+- 可保留专有名词、模型名、数据集名、术语缩写为原文。
+- 摘要写成 3 段短段落（背景/问题、方法/数据、结果/影响或局限），段落间空一行，不加小标题。
+- 控制在约 180-320 个中文字符，内容忠实于论文，不得编造结论。
+- 对事实性陈述（尤其含数字的结论）使用 [^1], [^2] 这类行内引用标记，并与 `summary_citations` 的 index 顺序一致（从 1 开始连续编号）。
+""")
+
+        if "highlights" in schema.model_fields:
+            task_specific_instructions.append("""
+Special handling for highlight annotations:
+- `highlights[*].text` 必须是论文中的原文片段（可保持原语言，不要翻译原文片段）。
+- `highlights[*].annotation` 必须使用简体中文（zh-CN），用 1-2 句解释这段原文为什么重要。
+- `annotation` 要准确、克制，避免夸大，不要引入论文中不存在的新结论。
+- 若原文片段包含数字或实验结果，在注释中保留关键数值与术语，便于快速核对。
+- 优先从方法、实验、结果、讨论等正文段落选取，不要从标题区和 Abstract 段落选取高亮。
+""")
+
+        return EXTRACT_METADATA_PROMPT_TEMPLATE.format(
+            task_specific_instructions="\n".join(task_specific_instructions)
+        )
 
     @retry_llm_operation(max_retries=3, delay=1.0)
     async def extract_title_authors_abstract(
@@ -435,52 +496,66 @@ class PaperOperations(AsyncLLMClient):
 
             try:
                 try:
-                    async with time_it("Creating cache for paper content", job_id=job_id):
+                    async with time_it(
+                        "Creating cache for paper content", job_id=job_id
+                    ):
                         cache_key = await self.create_cache(paper_content, client)
                 except Exception as e:
                     logger.error(f"Failed to create cache: {e}", exc_info=True)
                     cache_key = None
 
                 # Run all extraction tasks concurrently
-                async with time_it("Running all metadata extraction tasks concurrently", job_id=job_id):
+                async with time_it(
+                    "Running all metadata extraction tasks concurrently", job_id=job_id
+                ):
                     tasks = [
-                        asyncio.create_task(time_it("Extracting title, authors, and abstract", job_id=job_id)(
-                            self.extract_title_authors_abstract
-                        )(
-                            paper_content=paper_content,
-                            cache_key=cache_key,
-                            status_callback=status_callback,
-                            client=client,
-                        )),
-                        asyncio.create_task(time_it("Extracting institutions and keywords", job_id=job_id)(
-                            self.extract_institutions_keywords
-                        )(
-                            paper_content=paper_content,
-                            cache_key=cache_key,
-                            status_callback=status_callback,
-                            client=client,
-                        )),
-                        asyncio.create_task(time_it("Extracting summary and citations", job_id=job_id)(
-                            self.extract_summary_and_citations
-                        )(
-                            paper_content=paper_content,
-                            cache_key=cache_key,
-                            status_callback=status_callback,
-                            client=client,
-                        )),
-                        asyncio.create_task(time_it("Extracting highlights", job_id=job_id)(
-                            self.extract_highlights
-                        )(
-                            paper_content=paper_content,
-                            cache_key=cache_key,
-                            status_callback=status_callback,
-                            client=client,
-                        )),
+                        asyncio.create_task(
+                            time_it(
+                                "Extracting title, authors, and abstract", job_id=job_id
+                            )(self.extract_title_authors_abstract)(
+                                paper_content=paper_content,
+                                cache_key=cache_key,
+                                status_callback=status_callback,
+                                client=client,
+                            )
+                        ),
+                        asyncio.create_task(
+                            time_it(
+                                "Extracting institutions and keywords", job_id=job_id
+                            )(self.extract_institutions_keywords)(
+                                paper_content=paper_content,
+                                cache_key=cache_key,
+                                status_callback=status_callback,
+                                client=client,
+                            )
+                        ),
+                        asyncio.create_task(
+                            time_it("Extracting summary and citations", job_id=job_id)(
+                                self.extract_summary_and_citations
+                            )(
+                                paper_content=paper_content,
+                                cache_key=cache_key,
+                                status_callback=status_callback,
+                                client=client,
+                            )
+                        ),
+                        asyncio.create_task(
+                            time_it("Extracting highlights", job_id=job_id)(
+                                self.extract_highlights
+                            )(
+                                paper_content=paper_content,
+                                cache_key=cache_key,
+                                status_callback=status_callback,
+                                client=client,
+                            )
+                        ),
                     ]
 
                     # Use shield to prevent task cancellation during cleanup
                     shielded_tasks = [asyncio.shield(task) for task in tasks]
-                    results = await asyncio.gather(*shielded_tasks, return_exceptions=True)
+                    results = await asyncio.gather(
+                        *shielded_tasks, return_exceptions=True
+                    )
 
                 # Process results and handle potential errors
                 (
@@ -490,19 +565,38 @@ class PaperOperations(AsyncLLMClient):
                     highlights,
                 ) = results
 
+                # Log any extraction failures explicitly
+                task_labels = [
+                    "title/authors/abstract",
+                    "institutions/keywords",
+                    "summary/citations",
+                    "highlights",
+                ]
+                for label, result in zip(task_labels, results):
+                    if isinstance(result, Exception):
+                        logger.error(
+                            f"LLM extraction '{label}' failed for job {job_id}: {result}",
+                            exc_info=result,
+                        )
+
+                # Critical fields: raise if extraction failed so the job reports an error
+                if isinstance(title_authors_abstract, Exception):
+                    raise title_authors_abstract
+                if isinstance(summary_and_citations, Exception):
+                    raise summary_and_citations
+
+                # Non-critical fields: use defaults if extraction failed
                 # Combine the results into the final metadata object
                 return PaperMetadataExtraction(
-                    title=getattr(title_authors_abstract, "title", ""),
-                    authors=getattr(title_authors_abstract, "authors", []),
-                    abstract=getattr(title_authors_abstract, "abstract", ""),
+                    title=title_authors_abstract.title,
+                    authors=title_authors_abstract.authors,
+                    abstract=title_authors_abstract.abstract,
                     institutions=getattr(institutions_keywords, "institutions", []),
                     keywords=getattr(institutions_keywords, "keywords", []),
-                    summary=getattr(summary_and_citations, "summary", ""),
-                    summary_citations=getattr(
-                        summary_and_citations, "summary_citations", []
-                    ),
+                    summary=summary_and_citations.summary,
+                    summary_citations=summary_and_citations.summary_citations,
                     highlights=getattr(highlights, "highlights", []),
-                    publish_date=getattr(title_authors_abstract, "publish_date", None),
+                    publish_date=title_authors_abstract.publish_date,
                 )
 
             except Exception as e:
@@ -532,22 +626,24 @@ class PaperOperations(AsyncLLMClient):
         try:
             cols_str = "\n".join(f"- {col}" for col in columns)
             prompt = EXTRACT_COLS_INSTRUCTION.format(
-                cols_str=cols_str,
-                n_cols=len(columns)
+                cols_str=cols_str, n_cols=len(columns)
             )
 
             # Create the dynamic schema that matches DataTableRow structure
             # Each column maps to a DataTableCellValue (value + citations)
             field_definitions: Dict[str, Any] = {
-                col: (DataTableCellValue, Field(description=f"Value and citations for column '{col}'"))
+                col: (
+                    DataTableCellValue,
+                    Field(description=f"Value and citations for column '{col}'"),
+                )
                 for col in columns
             }
 
             # Create the values model that enforces all column names as required fields
             ValuesModel = create_model(
-                'ValuesModel',
+                "ValuesModel",
                 __config__=ConfigDict(),  # Prevent extra fields
-                **field_definitions
+                **field_definitions,
             )
 
             response = await self.generate_content(
@@ -564,15 +660,11 @@ class PaperOperations(AsyncLLMClient):
 
             # Convert the Pydantic model to a dict for DataTableRow
             values_dict: Dict[str, DataTableCellValue] = {
-                col: getattr(values_instance, col)
-                for col in columns
+                col: getattr(values_instance, col) for col in columns
             }
 
             # Create and return the DataTableRow
-            return DataTableRow(
-                paper_id=paper_id,
-                values=values_dict
-            )
+            return DataTableRow(paper_id=paper_id, values=values_dict)
         except Exception as e:
             logger.error(f"Error extracting data table: {str(e)}", exc_info=True)
             raise ValueError(f"Failed to extract DT for paper {paper_id}: {str(e)}")

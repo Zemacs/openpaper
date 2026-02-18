@@ -11,6 +11,13 @@ EXTRACT_METADATA_PROMPT_TEMPLATE = """
 You are a metadata extraction assistant. Your task is to extract specific information from the provided academic paper content. You must be thorough in your approach and ensure that all relevant metadata is captured accurately.
 
 Please extract the following fields and structure them in a JSON format according to the provided schema.
+
+General output requirements:
+- Return ONLY valid JSON. Do not add markdown code fences.
+- Strictly follow the provided schema field names and types.
+- Do not invent facts that are not supported by the paper content.
+
+{task_specific_instructions}
 """
 
 

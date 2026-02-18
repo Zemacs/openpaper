@@ -1,10 +1,13 @@
 """
 Pydantic schemas for PDF processing.
 """
+
 from enum import Enum
 from typing import List, Optional
 from uuid import UUID
+
 from pydantic import BaseModel, Field
+
 
 class ResponseCitation(BaseModel):
     """
@@ -28,6 +31,7 @@ class HighlightType(str, Enum):
     RESULT = "result"
     IMPACT = "impact"
 
+
 class AIHighlight(BaseModel):
     """
     Schema for a highlight in the paper.
@@ -38,7 +42,7 @@ class AIHighlight(BaseModel):
         description="The raw text of the highlight as it appears in the paper. Ensure that this is a direct quote or paraphrase from the paper."
     )
     annotation: str = Field(
-        description="The context or annotation for the highlight, explaining its significance or relevance to the paper's content. Less than 350 characters."
+        description="The context or annotation for the highlight, explaining its significance or relevance to the paper's content. Must be in Simplified Chinese (zh-CN). Less than 350 characters."
     )
 
     type: HighlightType = Field(
@@ -48,6 +52,7 @@ class AIHighlight(BaseModel):
 
 class TitleAuthorsAbstract(BaseModel):
     """Schema for title, authors, and abstract extraction."""
+
     title: str = Field(description="Title of the paper **in normal case**")
     authors: List[str] = Field(default=[], description="List of authors")
     abstract: str = Field(default="", description="Abstract of the paper")
@@ -58,6 +63,7 @@ class TitleAuthorsAbstract(BaseModel):
 
 class InstitutionsKeywords(BaseModel):
     """Schema for institutions and keywords extraction."""
+
     institutions: List[str] = Field(
         default=[], description="List of institutions involved in the publication."
     )
@@ -66,6 +72,7 @@ class InstitutionsKeywords(BaseModel):
 
 class SummaryAndCitations(BaseModel):
     """Schema for summary and citations extraction."""
+
     summary_citations: List[ResponseCitation] = Field(
         description="List of citations supporting the summary. Include direct quotes or paraphrases with the citation index. The index should match the inline citations used in the summary. Only include citations that are directly relevant to the summary content. Use sequential numbering starting from 1."
     )
@@ -96,6 +103,7 @@ class SummaryAndCitations(BaseModel):
 
 class Highlights(BaseModel):
     """Schema for highlights extraction."""
+
     highlights: List[AIHighlight] = Field(
         default=[],
         description="""
@@ -103,7 +111,7 @@ Extract 3-5 standout highlights that capture the most compelling and unique aspe
 
 Requirements for Highlights:
 - Each highlight should be a direct, exact quote from the paper
-- Each highlight must be accompanied by a brief annotation (1-2 sentences) explaining its significance or relevance to the paper's contributions
+- Each highlight must be accompanied by a brief annotation (1-2 sentences) in Simplified Chinese (zh-CN), explaining its significance or relevance to the paper's contributions
 
 Selection Criteria:
 Prioritize highlights that are:
@@ -140,6 +148,7 @@ Think: "If I could only share 3-5 insights from this paper with a colleague, wha
 
 class PaperMetadataExtraction(BaseModel):
     """Extracted metadata from a paper"""
+
     title: str = Field(description="Title of the paper in normal case")
     authors: List[str] = Field(default=[], description="List of authors")
     abstract: str = Field(default="", description="Abstract of the paper")
@@ -187,6 +196,7 @@ The summary should be accessible to readers with basic domain knowledge while ma
 
 class PDFProcessingResult(BaseModel):
     """Result of PDF processing"""
+
     success: bool
     job_id: str
     raw_content: Optional[str] = None
@@ -199,35 +209,39 @@ class PDFProcessingResult(BaseModel):
     error: Optional[str] = None
     duration: Optional[float] = None  # Duration in seconds
 
+
 class DocumentMapping(BaseModel):
     title: str
     s3_object_key: str
     id: str
 
+
 class DataTableSchema(BaseModel):
-    columns: List[str] = Field(
-        description="List of column names in the data table."
-    )
+    columns: List[str] = Field(description="List of column names in the data table.")
     papers: List[DocumentMapping] = Field(
         description="List of papers included in the data table."
     )
 
+
 class DataTableCellValue(BaseModel):
     """Value for a single cell in the data table with supporting citations."""
+
     value: str = Field(description="The extracted value for this column")
     citations: List[ResponseCitation] = Field(
         default=[],
-        description="List of citations that support this specific value. These should be direct quotes or paraphrases from the paper."
+        description="List of citations that support this specific value. These should be direct quotes or paraphrases from the paper.",
     )
+
 
 class DataTableRow(BaseModel):
     paper_id: str
     values: dict[str, DataTableCellValue]  # column_name -> cell value with citations
 
+
 class DataTableResult(BaseModel):
     success: bool
-    columns: List[str] = Field(
-        description="List of column names in the data table."
-    )
+    columns: List[str] = Field(description="List of column names in the data table.")
     rows: List[DataTableRow] = Field(default=[], description="Row data per paper")
-    row_failures: List[str] = Field(default=[], description="List of paper_ids that failed to process")
+    row_failures: List[str] = Field(
+        default=[], description="List of paper_ids that failed to process"
+    )
