@@ -174,6 +174,7 @@ export default function InlineAnnotationMenu(props: InlineAnnotationMenuProps) {
     const menuRef = useRef<HTMLDivElement>(null);
     const lastAutoTranslateKeyRef = useRef("");
     const lastAnchorRef = useRef<{ x: number; y: number } | null>(null);
+    const horizontalPlacementRef = useRef<"right" | "left" | null>(null);
     const verticalPlacementRef = useRef<"above" | "below" | null>(null);
 
     const isMenuOpen = Boolean(tooltipPosition);
@@ -219,6 +220,7 @@ export default function InlineAnnotationMenu(props: InlineAnnotationMenuProps) {
         if (!tooltipPosition) {
             setMenuLayout(null);
             lastAnchorRef.current = null;
+            horizontalPlacementRef.current = null;
             verticalPlacementRef.current = null;
             return;
         }
@@ -238,16 +240,31 @@ export default function InlineAnnotationMenu(props: InlineAnnotationMenuProps) {
             || Math.abs(previousAnchor.y - anchorY) > MENU_ANCHOR_RESET_THRESHOLD;
         if (anchorMoved) {
             lastAnchorRef.current = { x: anchorX, y: anchorY };
+            horizontalPlacementRef.current = null;
             verticalPlacementRef.current = null;
         }
 
-        const left = Math.max(
-            MENU_VIEWPORT_PADDING,
-            Math.min(
-                anchorX - width / 2,
-                viewportWidth - width - MENU_VIEWPORT_PADDING,
-            ),
-        );
+        const minLeft = MENU_VIEWPORT_PADDING;
+        const maxLeft = viewportWidth - width - MENU_VIEWPORT_PADDING;
+        const preferredRightLeft = anchorX + MENU_OFFSET;
+        const preferredLeftLeft = anchorX - width - MENU_OFFSET;
+        const canPlaceRight = preferredRightLeft <= maxLeft;
+        const canPlaceLeft = preferredLeftLeft >= minLeft;
+
+        if (!horizontalPlacementRef.current) {
+            if (canPlaceRight) {
+                horizontalPlacementRef.current = "right";
+            } else if (canPlaceLeft) {
+                horizontalPlacementRef.current = "left";
+            } else {
+                horizontalPlacementRef.current = "right";
+            }
+        }
+
+        const rawLeft = horizontalPlacementRef.current === "left"
+            ? preferredLeftLeft
+            : preferredRightLeft;
+        const left = Math.max(minLeft, Math.min(rawLeft, maxLeft));
 
         const preferredBelow = anchorY + MENU_OFFSET;
         const spaceBelow = viewportHeight - preferredBelow - MENU_VIEWPORT_PADDING;

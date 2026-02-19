@@ -102,6 +102,24 @@ test("menu position follows tooltip updates", async ({ page }) => {
     expect(after!.y).toBeGreaterThan(before!.y + 80);
 });
 
+test("menu prefers appearing to the right of anchor when space is available", async ({ page }) => {
+    await page.route("**/api/translate/selection", async (route) => {
+        await route.fulfill({
+            status: 200,
+            contentType: "application/json",
+            body: JSON.stringify(mockWordResponse()),
+        });
+    });
+
+    await page.goto("/translation-e2e");
+    const menu = page.getByTestId("inline-annotation-menu");
+    await expect(menu).toBeVisible();
+
+    const bbox = await menu.boundingBox();
+    expect(bbox).not.toBeNull();
+    expect(bbox!.x).toBeGreaterThan(240);
+});
+
 test("does not retrigger translation when only tooltip position changes", async ({ page }) => {
     let translateCalls = 0;
     await page.route("**/api/translate/selection", async (route) => {

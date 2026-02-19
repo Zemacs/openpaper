@@ -83,6 +83,13 @@ function getDomSelectionKey(range: Range, text: string): string {
   ].join("|");
 }
 
+interface SelectionAnchorOptions {
+  fallbackPoint?: { x: number; y: number };
+  anchorPoint?: { x: number; y: number } | null;
+}
+
+const DRAG_ANCHOR_DISTANCE_THRESHOLD_PX = 4;
+
 export interface PdfHighlighterViewerProps {
   paperId?: string;
   pdfUrl: string;
@@ -165,10 +172,17 @@ export function PdfHighlighterViewer(props: PdfHighlighterViewerProps) {
   const [selectedContextBefore, setSelectedContextBefore] = useState<string | null>(null);
   const [selectedContextAfter, setSelectedContextAfter] = useState<string | null>(null);
   const lastPointerRef = useRef<{ x: number; y: number; ts: number } | null>(null);
+  const selectionStartPointerRef = useRef<{ x: number; y: number; ts: number } | null>(null);
+  const hasDraggedSelectionRef = useRef(false);
   const isPointerSelectingRef = useRef(false);
   const lastAppliedDomSelectionKeyRef = useRef<string | null>(null);
   const [isSelectionInProgress, setIsSelectionInProgress] = useState(false);
   const selectionProgressTimeoutRef = useRef<number | null>(null);
+
+  const clearSelectionAnchorState = useCallback(() => {
+    selectionStartPointerRef.current = null;
+    hasDraggedSelectionRef.current = false;
+  }, []);
 
   const clearSelectionProgressTimeout = useCallback(() => {
     if (selectionProgressTimeoutRef.current !== null) {
@@ -188,6 +202,7 @@ export function PdfHighlighterViewer(props: PdfHighlighterViewerProps) {
   const markSelectionStarted = useCallback(() => {
     clearSelectionProgressTimeout();
     isPointerSelectingRef.current = true;
+    hasDraggedSelectionRef.current = false;
     setIsSelectionInProgress(true);
     // Safety fallback: avoid getting stuck if pointerup is lost.
     selectionProgressTimeoutRef.current = window.setTimeout(() => {
@@ -252,7 +267,7 @@ export function PdfHighlighterViewer(props: PdfHighlighterViewerProps) {
   }, []);
 
   const applyDomSelection = useCallback(
-    (fallbackPoint?: { x: number; y: number }) => {
+    (options?: SelectionAnchorOptions) => {
       const container = containerRef.current;
       const domSelection = window.getSelection();
       if (!container || !domSelection || domSelection.rangeCount === 0) {
@@ -287,6 +302,7 @@ export function PdfHighlighterViewer(props: PdfHighlighterViewerProps) {
         selectedText === normalizedSelected &&
         lastAppliedDomSelectionKeyRef.current === selectionKey
       ) {
+        clearSelectionAnchorState();
         markSelectionCompleted();
         return true;
       }
@@ -297,11 +313,12 @@ export function PdfHighlighterViewer(props: PdfHighlighterViewerProps) {
       }
 
       const rect = range.getBoundingClientRect();
+      const anchorPoint = options?.anchorPoint;
       const recentPointer = lastPointerRef.current;
       const hasRecentPointer =
         recentPointer && Date.now() - recentPointer.ts < 2000;
-      const pointerX = fallbackPoint?.x ?? (hasRecentPointer ? recentPointer.x : undefined);
-      const pointerY = fallbackPoint?.y ?? (hasRecentPointer ? recentPointer.y : undefined);
+      const pointerX = options?.fallbackPoint?.x ?? (hasRecentPointer ? recentPointer.x : undefined);
+      const pointerY = options?.fallbackPoint?.y ?? (hasRecentPointer ? recentPointer.y : undefined);
       const rectHasGeometry =
         Number.isFinite(rect.left) &&
         Number.isFinite(rect.top) &&
@@ -310,16 +327,20 @@ export function PdfHighlighterViewer(props: PdfHighlighterViewerProps) {
         rect.width > 0 &&
         rect.height > 0;
       const x =
-        rectHasGeometry
-          ? rect.left + rect.width / 2
+        typeof anchorPoint?.x === "number"
+          ? anchorPoint.x
+          : rectHasGeometry
+            ? rect.right
           : typeof pointerX === "number"
             ? pointerX
             : rect.right > 0
               ? rect.right
               : 24;
       const y =
-        rectHasGeometry
-          ? rect.bottom
+        typeof anchorPoint?.y === "number"
+          ? anchorPoint.y
+          : rectHasGeometry
+            ? rect.bottom
           : typeof pointerY === "number"
             ? pointerY
             : rect.top + rect.height / 2 > 0
@@ -351,10 +372,12 @@ export function PdfHighlighterViewer(props: PdfHighlighterViewerProps) {
       }
 
       lastAppliedDomSelectionKeyRef.current = selectionKey;
+      clearSelectionAnchorState();
       markSelectionCompleted();
       return true;
     },
     [
+      clearSelectionAnchorState,
       extractSelectionContext,
       markSelectionCompleted,
       selectedText,
@@ -366,11 +389,11 @@ export function PdfHighlighterViewer(props: PdfHighlighterViewerProps) {
   );
 
   const applyDomSelectionWithFallback = useCallback(
-    (point?: { x: number; y: number }) => {
-      const appliedImmediately = applyDomSelection(point);
+    (options?: SelectionAnchorOptions) => {
+      const appliedImmediately = applyDomSelection(options);
       if (!appliedImmediately) {
         setTimeout(() => {
-          void applyDomSelection(point);
+          void applyDomSelection(options);
         }, 0);
       }
     },
@@ -481,7 +504,6 @@ export function PdfHighlighterViewer(props: PdfHighlighterViewerProps) {
       setCurrentSelection(selection);
       setSelectedText(normalizeSelectionText(selection.content.text || ""));
       setIsHighlightInteraction(false);
-      markSelectionCompleted();
 
       try {
         const ghostHighlight = selection.makeGhostHighlight();
@@ -510,9 +532,14 @@ export function PdfHighlighterViewer(props: PdfHighlighterViewerProps) {
           Number.isFinite(rect.height) &&
           rect.width > 0 &&
           rect.height > 0;
+        const dragAnchor = hasDraggedSelectionRef.current
+          ? selectionStartPointerRef.current
+          : null;
         setTooltipPosition({
-          x: rectHasGeometry ? rect.left + rect.width / 2 : rect.right,
-          y: rectHasGeometry ? rect.bottom : rect.top + rect.height / 2,
+          x: dragAnchor ? dragAnchor.x : rect.right,
+          y: dragAnchor
+            ? dragAnchor.y
+            : rectHasGeometry ? rect.bottom : rect.top + rect.height / 2,
         });
         try {
           const { before, after } = extractSelectionContext(range);
@@ -529,8 +556,10 @@ export function PdfHighlighterViewer(props: PdfHighlighterViewerProps) {
         setSelectedContextBefore(null);
         setSelectedContextAfter(null);
       }
+      clearSelectionAnchorState();
+      markSelectionCompleted();
     },
-    [extractSelectionContext, markSelectionCompleted, setSelectedText, setTooltipPosition, setIsHighlightInteraction],
+    [clearSelectionAnchorState, extractSelectionContext, markSelectionCompleted, setSelectedText, setTooltipPosition, setIsHighlightInteraction],
   );
 
   // Fallback for browsers / edge interactions where PdfHighlighter's onSelection does not fire.
@@ -540,29 +569,65 @@ export function PdfHighlighterViewer(props: PdfHighlighterViewerProps) {
 
     const onPointerDown = (event: PointerEvent) => {
       markSelectionStarted();
+      selectionStartPointerRef.current = {
+        x: event.clientX,
+        y: event.clientY,
+        ts: Date.now(),
+      };
+      lastPointerRef.current = { x: event.clientX, y: event.clientY, ts: Date.now() };
+    };
+
+    const onPointerMove = (event: PointerEvent) => {
+      if (!isPointerSelectingRef.current) return;
+      const startPointer = selectionStartPointerRef.current;
+      if (!startPointer) return;
+
+      const deltaX = Math.abs(event.clientX - startPointer.x);
+      const deltaY = Math.abs(event.clientY - startPointer.y);
+      if (
+        deltaX > DRAG_ANCHOR_DISTANCE_THRESHOLD_PX
+        || deltaY > DRAG_ANCHOR_DISTANCE_THRESHOLD_PX
+      ) {
+        hasDraggedSelectionRef.current = true;
+      }
       lastPointerRef.current = { x: event.clientX, y: event.clientY, ts: Date.now() };
     };
 
     const onMouseUp = (event: MouseEvent) => {
       markSelectionCompleted();
       lastPointerRef.current = { x: event.clientX, y: event.clientY, ts: Date.now() };
+      const pointerPoint = { x: event.clientX, y: event.clientY };
+      const dragAnchor = hasDraggedSelectionRef.current && selectionStartPointerRef.current
+        ? {
+            x: selectionStartPointerRef.current.x,
+            y: selectionStartPointerRef.current.y,
+          }
+        : pointerPoint;
       applyDomSelectionWithFallback({
-        x: event.clientX,
-        y: event.clientY,
+        fallbackPoint: pointerPoint,
+        anchorPoint: dragAnchor,
       });
     };
 
     const onContextMenu = (event: MouseEvent) => {
       markSelectionCompleted();
       lastPointerRef.current = { x: event.clientX, y: event.clientY, ts: Date.now() };
+      const pointerPoint = { x: event.clientX, y: event.clientY };
+      const dragAnchor = hasDraggedSelectionRef.current && selectionStartPointerRef.current
+        ? {
+            x: selectionStartPointerRef.current.x,
+            y: selectionStartPointerRef.current.y,
+          }
+        : pointerPoint;
       applyDomSelectionWithFallback({
-        x: event.clientX,
-        y: event.clientY,
+        fallbackPoint: pointerPoint,
+        anchorPoint: dragAnchor,
       });
     };
 
     const onPointerCancel = () => {
       markSelectionCompleted();
+      clearSelectionAnchorState();
     };
 
     const onDocumentPointerUp = (event: PointerEvent) => {
@@ -571,23 +636,33 @@ export function PdfHighlighterViewer(props: PdfHighlighterViewerProps) {
       if (!wasSelecting) {
         return;
       }
+      const pointerPoint = { x: event.clientX, y: event.clientY };
+      const dragAnchor = hasDraggedSelectionRef.current && selectionStartPointerRef.current
+        ? {
+            x: selectionStartPointerRef.current.x,
+            y: selectionStartPointerRef.current.y,
+          }
+        : pointerPoint;
       applyDomSelectionWithFallback({
-        x: event.clientX,
-        y: event.clientY,
+        fallbackPoint: pointerPoint,
+        anchorPoint: dragAnchor,
       });
     };
 
     const onWindowBlur = () => {
       markSelectionCompleted();
+      clearSelectionAnchorState();
     };
 
     const onVisibilityChange = () => {
       if (document.visibilityState !== "visible") {
         markSelectionCompleted();
+        clearSelectionAnchorState();
       }
     };
 
     container.addEventListener("pointerdown", onPointerDown, true);
+    container.addEventListener("pointermove", onPointerMove, true);
     container.addEventListener("mouseup", onMouseUp, true);
     container.addEventListener("contextmenu", onContextMenu, true);
     document.addEventListener("pointerup", onDocumentPointerUp, true);
@@ -598,6 +673,7 @@ export function PdfHighlighterViewer(props: PdfHighlighterViewerProps) {
     return () => {
       clearSelectionProgressTimeout();
       container.removeEventListener("pointerdown", onPointerDown, true);
+      container.removeEventListener("pointermove", onPointerMove, true);
       container.removeEventListener("mouseup", onMouseUp, true);
       container.removeEventListener("contextmenu", onContextMenu, true);
       document.removeEventListener("pointerup", onDocumentPointerUp, true);
@@ -605,7 +681,7 @@ export function PdfHighlighterViewer(props: PdfHighlighterViewerProps) {
       window.removeEventListener("blur", onWindowBlur);
       document.removeEventListener("visibilitychange", onVisibilityChange);
     };
-  }, [applyDomSelectionWithFallback, clearSelectionProgressTimeout, markSelectionCompleted, markSelectionStarted]);
+  }, [applyDomSelectionWithFallback, clearSelectionAnchorState, clearSelectionProgressTimeout, markSelectionCompleted, markSelectionStarted]);
 
   // Additional fallback: some browsers/plugins skip mouseup callbacks but still emit selectionchange.
   useEffect(() => {
