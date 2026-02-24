@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import re
 
 from app.auth.dependencies import get_required_user
 from app.database.database import get_db
@@ -28,6 +29,7 @@ logger = logging.getLogger(__name__)
 
 translation_router = APIRouter()
 MAX_CONTEXT_CHARS = 300
+MAX_SELECTED_TEXT_CHARS = int(os.getenv("TRANSLATION_MAX_SELECTED_TEXT_CHARS", "5000"))
 ESTIMATED_OUTPUT_CHARS = 400
 TRANSLATION_TIMEOUT_SECONDS = int(os.getenv("TRANSLATION_TIMEOUT_SECONDS", "12"))
 
@@ -49,15 +51,27 @@ def _estimate_request_chars(
     return len(selected_text) + len(context_before) + len(context_after) + ESTIMATED_OUTPUT_CHARS
 
 
+def _normalize_selected_text(text: str) -> str:
+    return re.sub(r"\s+", " ", text or "").strip()
+
+
+def _truncate_selected_text(text: str) -> tuple[str, bool]:
+    if len(text) <= MAX_SELECTED_TEXT_CHARS:
+        return text, False
+    return text[:MAX_SELECTED_TEXT_CHARS].rstrip(), True
+
+
 @translation_router.post("/selection", response_model=TranslateSelectionResponse)
 async def translate_selection(
     request: TranslateSelectionRequest,
     db: Session = Depends(get_db),
     current_user: CurrentUser = Depends(get_required_user),
 ) -> TranslateSelectionResponse:
-    selected_text = request.selected_text.strip()
+    original_selection_len = len(request.selected_text or "")
+    selected_text = _normalize_selected_text(request.selected_text)
     if not selected_text:
         raise HTTPException(status_code=400, detail="selected_text cannot be empty.")
+    selected_text, was_truncated = _truncate_selected_text(selected_text)
 
     context_before = _normalize_context(request.context_before, keep_tail=True)
     context_after = _normalize_context(request.context_after, keep_tail=False)
@@ -68,6 +82,8 @@ async def translate_selection(
         properties={
             "paper_id": request.paper_id,
             "selection_len": len(selected_text),
+            "selection_len_raw": original_selection_len,
+            "selection_truncated": was_truncated,
             "selection_type_hint": request.selection_type_hint.value,
             "target_language": request.target_language,
         },

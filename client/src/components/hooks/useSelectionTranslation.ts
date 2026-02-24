@@ -19,6 +19,7 @@ interface TranslateSelectionInput {
 
 const TRANSLATION_TIMEOUT_MS = 18_000;
 const MAX_RETRY_ATTEMPTS = 2;
+const MAX_SELECTED_TEXT_CHARS = 5000;
 const TRANSIENT_TRANSLATION_ERROR_MARKERS = [
     "llm provider is busy",
     "timed out",
@@ -41,6 +42,14 @@ function isTransientTranslationError(error: unknown): boolean {
 
 function toErrorMessage(error: unknown, fallback: string): string {
     return error instanceof Error ? error.message : fallback;
+}
+
+function normalizeSelectedTextForRequest(text: string): string {
+    const normalized = text.replace(/\s+/g, " ").trim();
+    if (normalized.length <= MAX_SELECTED_TEXT_CHARS) {
+        return normalized;
+    }
+    return normalized.slice(0, MAX_SELECTED_TEXT_CHARS).trimEnd();
 }
 
 function buildRequestBody(
@@ -146,7 +155,7 @@ export function useSelectionTranslation(paperId?: string) {
                 return null;
             }
 
-            const selectedText = payload.selectedText.trim();
+            const selectedText = normalizeSelectedTextForRequest(payload.selectedText);
             if (!selectedText) {
                 return null;
             }

@@ -31,7 +31,7 @@ const HIGHLIGHT_COLOR_MAP: Record<HighlightColor, string> = {
 };
 import EnigmaticLoadingExperience from "@/components/EnigmaticLoadingExperience";
 import { PaperStatus } from "./utils/PdfStatus";
-import InlineAnnotationMenu from "./InlineAnnotationMenu";
+import InlineAnnotationMenu, { type InlineMenuMode } from "./InlineAnnotationMenu";
 
 import {
   ExtendedHighlight,
@@ -86,9 +86,38 @@ function getDomSelectionKey(range: Range, text: string): string {
 interface SelectionAnchorOptions {
   fallbackPoint?: { x: number; y: number };
   anchorPoint?: { x: number; y: number } | null;
+  selectionIntent?: SelectionIntent;
 }
 
 const DRAG_ANCHOR_DISTANCE_THRESHOLD_PX = 4;
+
+type SelectionIntent =
+  | "translate"
+  | "actions"
+  | "quick-highlight"
+  | "quick-annotate";
+
+interface ModifierSnapshot {
+  altKey: boolean;
+  shiftKey: boolean;
+  metaKey: boolean;
+  ctrlKey: boolean;
+}
+
+const DEFAULT_SELECTION_INTENT: SelectionIntent = "translate";
+
+function resolveSelectionIntent(modifiers: ModifierSnapshot): SelectionIntent {
+  if (modifiers.metaKey || modifiers.ctrlKey) {
+    return "quick-annotate";
+  }
+  if (modifiers.altKey) {
+    return "quick-highlight";
+  }
+  if (modifiers.shiftKey) {
+    return "actions";
+  }
+  return DEFAULT_SELECTION_INTENT;
+}
 
 export interface PdfHighlighterViewerProps {
   paperId?: string;
@@ -168,6 +197,8 @@ export function PdfHighlighterViewer(props: PdfHighlighterViewerProps) {
   const [showScrollToTop] = useState(false);
   const [pdfReady, setPdfReady] = useState(false);
   const [highlightColor, setHighlightColor] = useState<HighlightColor>("blue");
+  const [inlineMenuMode, setInlineMenuMode] =
+    useState<InlineMenuMode>("translation");
   const [selectedPageNumber, setSelectedPageNumber] = useState<number | null>(null);
   const [selectedContextBefore, setSelectedContextBefore] = useState<string | null>(null);
   const [selectedContextAfter, setSelectedContextAfter] = useState<string | null>(null);
@@ -175,6 +206,10 @@ export function PdfHighlighterViewer(props: PdfHighlighterViewerProps) {
   const selectionStartPointerRef = useRef<{ x: number; y: number; ts: number } | null>(null);
   const hasDraggedSelectionRef = useRef(false);
   const isPointerSelectingRef = useRef(false);
+  const pendingSelectionIntentRef = useRef<SelectionIntent>(
+    DEFAULT_SELECTION_INTENT,
+  );
+  const suppressNextSelectionChangeRef = useRef(false);
   const lastAppliedDomSelectionKeyRef = useRef<string | null>(null);
   const [isSelectionInProgress, setIsSelectionInProgress] = useState(false);
   const selectionProgressTimeoutRef = useRef<number | null>(null);
@@ -182,6 +217,10 @@ export function PdfHighlighterViewer(props: PdfHighlighterViewerProps) {
   const clearSelectionAnchorState = useCallback(() => {
     selectionStartPointerRef.current = null;
     hasDraggedSelectionRef.current = false;
+  }, []);
+
+  const resetPendingSelectionIntent = useCallback(() => {
+    pendingSelectionIntentRef.current = DEFAULT_SELECTION_INTENT;
   }, []);
 
   const clearSelectionProgressTimeout = useCallback(() => {
@@ -216,6 +255,7 @@ export function PdfHighlighterViewer(props: PdfHighlighterViewerProps) {
       setSelectedPageNumber(null);
       setSelectedContextBefore(null);
       setSelectedContextAfter(null);
+      setInlineMenuMode("translation");
     }
   }, [selectedText]);
 
@@ -266,6 +306,69 @@ export function PdfHighlighterViewer(props: PdfHighlighterViewerProps) {
     return { before, after };
   }, []);
 
+  const clearSelectionUiState = useCallback(() => {
+    setCurrentSelection(null);
+    setSelectedText("");
+    setTooltipPosition(null);
+    setSelectedPageNumber(null);
+    setSelectedContextBefore(null);
+    setSelectedContextAfter(null);
+    setInlineMenuMode("translation");
+  }, [setSelectedText, setTooltipPosition]);
+
+  const resolveSelectionForQuickIntent = useCallback(
+    (normalizedText: string): PdfSelection | null => {
+      const liveSelection = highlighterUtilsRef.current?.getCurrentSelection() || null;
+      if (liveSelection) {
+        const liveText = normalizeSelectionText(liveSelection.content.text || "");
+        if (liveText === normalizedText) {
+          return liveSelection;
+        }
+      }
+
+      if (currentSelection) {
+        const cachedText = normalizeSelectionText(currentSelection.content.text || "");
+        if (cachedText === normalizedText) {
+          return currentSelection;
+        }
+      }
+
+      return null;
+    },
+    [currentSelection],
+  );
+
+  const commitHighlightFromSelection = useCallback(
+    (selection: PdfSelection, text: string, doAnnotate: boolean) => {
+      const normalizedText = normalizeSelectionText(text);
+      if (!normalizedText) return false;
+
+      try {
+        const ghostHighlight = selection.makeGhostHighlight();
+        // Avoid immediate jump; the new highlight is already under the current viewport.
+        blockScrollOnNextHighlight.current = true;
+        setActiveHighlight(null);
+
+        addHighlight(
+          normalizedText,
+          ghostHighlight.position as ScaledPosition,
+          ghostHighlight.position.boundingRect.pageNumber,
+          doAnnotate,
+          highlightColor,
+        );
+        // Prevent a stale selectionchange callback from reopening the translation window.
+        suppressNextSelectionChangeRef.current = true;
+        window.getSelection()?.removeAllRanges();
+        clearSelectionUiState();
+        return true;
+      } catch (error) {
+        console.warn("Failed to create quick highlight from selection:", error);
+        return false;
+      }
+    },
+    [addHighlight, clearSelectionUiState, highlightColor, setActiveHighlight],
+  );
+
   const applyDomSelection = useCallback(
     (options?: SelectionAnchorOptions) => {
       const container = containerRef.current;
@@ -276,6 +379,33 @@ export function PdfHighlighterViewer(props: PdfHighlighterViewerProps) {
 
       const normalizedSelected = normalizeSelectionText(domSelection.toString());
       if (!normalizedSelected) {
+        return false;
+      }
+
+      const selectionIntent =
+        options?.selectionIntent || pendingSelectionIntentRef.current;
+      const fallbackMenuMode: InlineMenuMode =
+        selectionIntent === "actions" ? "actions" : "translation";
+      const isQuickIntent =
+        selectionIntent === "quick-highlight"
+        || selectionIntent === "quick-annotate";
+
+      if (isQuickIntent) {
+        const selectionForQuickIntent = resolveSelectionForQuickIntent(normalizedSelected);
+        if (!selectionForQuickIntent) {
+          return false;
+        }
+        const consumed = commitHighlightFromSelection(
+          selectionForQuickIntent,
+          normalizedSelected,
+          selectionIntent === "quick-annotate",
+        );
+        if (consumed) {
+          clearSelectionAnchorState();
+          markSelectionCompleted();
+          resetPendingSelectionIntent();
+          return true;
+        }
         return false;
       }
 
@@ -300,14 +430,17 @@ export function PdfHighlighterViewer(props: PdfHighlighterViewerProps) {
       if (
         tooltipPosition &&
         selectedText === normalizedSelected &&
-        lastAppliedDomSelectionKeyRef.current === selectionKey
+        lastAppliedDomSelectionKeyRef.current === selectionKey &&
+        inlineMenuMode === fallbackMenuMode
       ) {
         clearSelectionAnchorState();
         markSelectionCompleted();
+        resetPendingSelectionIntent();
         return true;
       }
 
       setIsHighlightInteraction(false);
+      setInlineMenuMode(fallbackMenuMode);
       if (selectedText !== normalizedSelected) {
         setSelectedText(normalizedSelected);
       }
@@ -374,15 +507,21 @@ export function PdfHighlighterViewer(props: PdfHighlighterViewerProps) {
       lastAppliedDomSelectionKeyRef.current = selectionKey;
       clearSelectionAnchorState();
       markSelectionCompleted();
+      resetPendingSelectionIntent();
       return true;
     },
     [
+      commitHighlightFromSelection,
       clearSelectionAnchorState,
       extractSelectionContext,
+      inlineMenuMode,
       markSelectionCompleted,
+      resolveSelectionForQuickIntent,
+      resetPendingSelectionIntent,
       selectedText,
       tooltipPosition,
       setIsHighlightInteraction,
+      setInlineMenuMode,
       setSelectedText,
       setTooltipPosition,
     ],
@@ -501,9 +640,31 @@ export function PdfHighlighterViewer(props: PdfHighlighterViewerProps) {
   // Handle selection
   const handleSelection = useCallback(
     (selection: PdfSelection) => {
+      const selectionIntent = pendingSelectionIntentRef.current;
+      const normalizedSelected = normalizeSelectionText(
+        selection.content.text || "",
+      );
+
+      if (
+        (selectionIntent === "quick-highlight" ||
+          selectionIntent === "quick-annotate") &&
+        commitHighlightFromSelection(
+          selection,
+          normalizedSelected,
+          selectionIntent === "quick-annotate",
+        )
+      ) {
+        lastAppliedDomSelectionKeyRef.current = null;
+        clearSelectionAnchorState();
+        markSelectionCompleted();
+        resetPendingSelectionIntent();
+        return;
+      }
+
       setCurrentSelection(selection);
-      setSelectedText(normalizeSelectionText(selection.content.text || ""));
+      setSelectedText(normalizedSelected);
       setIsHighlightInteraction(false);
+      setInlineMenuMode(selectionIntent === "actions" ? "actions" : "translation");
 
       try {
         const ghostHighlight = selection.makeGhostHighlight();
@@ -532,14 +693,9 @@ export function PdfHighlighterViewer(props: PdfHighlighterViewerProps) {
           Number.isFinite(rect.height) &&
           rect.width > 0 &&
           rect.height > 0;
-        const dragAnchor = hasDraggedSelectionRef.current
-          ? selectionStartPointerRef.current
-          : null;
         setTooltipPosition({
-          x: dragAnchor ? dragAnchor.x : rect.right,
-          y: dragAnchor
-            ? dragAnchor.y
-            : rectHasGeometry ? rect.bottom : rect.top + rect.height / 2,
+          x: rectHasGeometry ? rect.right : rect.left + rect.width,
+          y: rectHasGeometry ? rect.bottom : rect.top + rect.height / 2,
         });
         try {
           const { before, after } = extractSelectionContext(range);
@@ -558,8 +714,18 @@ export function PdfHighlighterViewer(props: PdfHighlighterViewerProps) {
       }
       clearSelectionAnchorState();
       markSelectionCompleted();
+      resetPendingSelectionIntent();
     },
-    [clearSelectionAnchorState, extractSelectionContext, markSelectionCompleted, setSelectedText, setTooltipPosition, setIsHighlightInteraction],
+    [
+      clearSelectionAnchorState,
+      commitHighlightFromSelection,
+      extractSelectionContext,
+      markSelectionCompleted,
+      resetPendingSelectionIntent,
+      setSelectedText,
+      setTooltipPosition,
+      setIsHighlightInteraction,
+    ],
   );
 
   // Fallback for browsers / edge interactions where PdfHighlighter's onSelection does not fire.
@@ -569,6 +735,12 @@ export function PdfHighlighterViewer(props: PdfHighlighterViewerProps) {
 
     const onPointerDown = (event: PointerEvent) => {
       markSelectionStarted();
+      pendingSelectionIntentRef.current = resolveSelectionIntent({
+        altKey: event.altKey,
+        shiftKey: event.shiftKey,
+        metaKey: event.metaKey,
+        ctrlKey: event.ctrlKey,
+      });
       selectionStartPointerRef.current = {
         x: event.clientX,
         y: event.clientY,
@@ -596,68 +768,63 @@ export function PdfHighlighterViewer(props: PdfHighlighterViewerProps) {
     const onMouseUp = (event: MouseEvent) => {
       markSelectionCompleted();
       lastPointerRef.current = { x: event.clientX, y: event.clientY, ts: Date.now() };
+      const selectionIntent = pendingSelectionIntentRef.current;
       const pointerPoint = { x: event.clientX, y: event.clientY };
-      const dragAnchor = hasDraggedSelectionRef.current && selectionStartPointerRef.current
-        ? {
-            x: selectionStartPointerRef.current.x,
-            y: selectionStartPointerRef.current.y,
-          }
-        : pointerPoint;
       applyDomSelectionWithFallback({
         fallbackPoint: pointerPoint,
-        anchorPoint: dragAnchor,
+        anchorPoint: pointerPoint,
+        selectionIntent,
       });
+      resetPendingSelectionIntent();
     };
 
     const onContextMenu = (event: MouseEvent) => {
       markSelectionCompleted();
       lastPointerRef.current = { x: event.clientX, y: event.clientY, ts: Date.now() };
+      const selectionIntent = pendingSelectionIntentRef.current;
       const pointerPoint = { x: event.clientX, y: event.clientY };
-      const dragAnchor = hasDraggedSelectionRef.current && selectionStartPointerRef.current
-        ? {
-            x: selectionStartPointerRef.current.x,
-            y: selectionStartPointerRef.current.y,
-          }
-        : pointerPoint;
       applyDomSelectionWithFallback({
         fallbackPoint: pointerPoint,
-        anchorPoint: dragAnchor,
+        anchorPoint: pointerPoint,
+        selectionIntent,
       });
+      resetPendingSelectionIntent();
     };
 
     const onPointerCancel = () => {
       markSelectionCompleted();
       clearSelectionAnchorState();
+      resetPendingSelectionIntent();
     };
 
     const onDocumentPointerUp = (event: PointerEvent) => {
       const wasSelecting = isPointerSelectingRef.current;
       markSelectionCompleted();
       if (!wasSelecting) {
+        resetPendingSelectionIntent();
         return;
       }
+      const selectionIntent = pendingSelectionIntentRef.current;
       const pointerPoint = { x: event.clientX, y: event.clientY };
-      const dragAnchor = hasDraggedSelectionRef.current && selectionStartPointerRef.current
-        ? {
-            x: selectionStartPointerRef.current.x,
-            y: selectionStartPointerRef.current.y,
-          }
-        : pointerPoint;
       applyDomSelectionWithFallback({
         fallbackPoint: pointerPoint,
-        anchorPoint: dragAnchor,
+        anchorPoint: pointerPoint,
+        selectionIntent,
       });
+      resetPendingSelectionIntent();
     };
 
     const onWindowBlur = () => {
       markSelectionCompleted();
       clearSelectionAnchorState();
+      resetPendingSelectionIntent();
     };
 
     const onVisibilityChange = () => {
       if (document.visibilityState !== "visible") {
         markSelectionCompleted();
         clearSelectionAnchorState();
+        resetPendingSelectionIntent();
       }
     };
 
@@ -681,7 +848,14 @@ export function PdfHighlighterViewer(props: PdfHighlighterViewerProps) {
       window.removeEventListener("blur", onWindowBlur);
       document.removeEventListener("visibilitychange", onVisibilityChange);
     };
-  }, [applyDomSelectionWithFallback, clearSelectionAnchorState, clearSelectionProgressTimeout, markSelectionCompleted, markSelectionStarted]);
+  }, [
+    applyDomSelectionWithFallback,
+    clearSelectionAnchorState,
+    clearSelectionProgressTimeout,
+    markSelectionCompleted,
+    markSelectionStarted,
+    resetPendingSelectionIntent,
+  ]);
 
   // Additional fallback: some browsers/plugins skip mouseup callbacks but still emit selectionchange.
   useEffect(() => {
@@ -691,6 +865,10 @@ export function PdfHighlighterViewer(props: PdfHighlighterViewerProps) {
     let rafId: number | null = null;
 
     const onSelectionChange = () => {
+      if (suppressNextSelectionChangeRef.current) {
+        suppressNextSelectionChangeRef.current = false;
+        return;
+      }
       if (isPointerSelectingRef.current) {
         return;
       }
@@ -733,34 +911,12 @@ export function PdfHighlighterViewer(props: PdfHighlighterViewerProps) {
   const handleAddHighlightFromMenu = useCallback(
     (text: string, doAnnotate?: boolean) => {
       if (currentSelection) {
-        // Block scroll-to-highlight since we're creating a new one at the current location
-        blockScrollOnNextHighlight.current = true;
-        // Clear active highlight to prevent scroll back when highlights array updates
-        setActiveHighlight(null);
-
-        const ghostHighlight = currentSelection.makeGhostHighlight();
-        addHighlight(
-          text,
-          ghostHighlight.position as ScaledPosition,
-          ghostHighlight.position.boundingRect.pageNumber,
-          doAnnotate,
-          highlightColor,
-        );
-        setCurrentSelection(null);
-        setSelectedText("");
-        setTooltipPosition(null);
-        setSelectedPageNumber(null);
-        setSelectedContextBefore(null);
-        setSelectedContextAfter(null);
+        commitHighlightFromSelection(currentSelection, text, Boolean(doAnnotate));
       }
     },
     [
       currentSelection,
-      addHighlight,
-      setSelectedText,
-      setTooltipPosition,
-      highlightColor,
-      setActiveHighlight,
+      commitHighlightFromSelection,
     ],
   );
 
@@ -771,6 +927,7 @@ export function PdfHighlighterViewer(props: PdfHighlighterViewerProps) {
       event: MouseEvent,
     ) => {
       setIsHighlightInteraction(true);
+      setInlineMenuMode("actions");
       setSelectedText(
         viewportHighlight.content?.text || viewportHighlight.raw_text || "",
       );
@@ -833,6 +990,8 @@ export function PdfHighlighterViewer(props: PdfHighlighterViewerProps) {
           setSelectedPageNumber(null);
           setSelectedContextBefore(null);
           setSelectedContextAfter(null);
+          setInlineMenuMode("translation");
+          resetPendingSelectionIntent();
         }, 10);
       }
     };
@@ -851,6 +1010,7 @@ export function PdfHighlighterViewer(props: PdfHighlighterViewerProps) {
     setSelectedText,
     setTooltipPosition,
     setIsAnnotating,
+    resetPendingSelectionIntent,
   ]);
 
   // Scroll to active highlight when it changes (unless blocked, e.g., when clicking directly on a highlight)
@@ -1307,7 +1467,7 @@ export function PdfHighlighterViewer(props: PdfHighlighterViewerProps) {
                 onSelection={handleSelection}
                 onCreateGhostHighlight={handleCreateGhostHighlight}
                 onRemoveGhostHighlight={handleRemoveGhostHighlight}
-                enableAreaSelection={(event) => event.altKey}
+                enableAreaSelection={(event) => event.altKey && event.shiftKey}
                 utilsRef={(utils) => {
                   highlighterUtilsRef.current = utils;
                 }}
@@ -1341,6 +1501,7 @@ export function PdfHighlighterViewer(props: PdfHighlighterViewerProps) {
           addHighlight={handleAddHighlightFromMenu}
           removeHighlight={removeHighlight}
           setUserMessageReferences={setUserMessageReferences}
+          menuMode={inlineMenuMode}
         />
       )}
 

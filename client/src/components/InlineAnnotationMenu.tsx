@@ -10,14 +10,16 @@ import {
     useState,
 } from "react";
 import { createPortal } from "react-dom";
-import { Bookmark, Copy, Highlighter, Languages, MessageCircle, Minus, X } from "lucide-react";
+import { Bookmark, Copy, Highlighter, MessageCircle, Minus, X } from "lucide-react";
 
 import { type PaperHighlight } from "@/lib/schema";
 
 import { useSelectionTranslation } from "./hooks/useSelectionTranslation";
 import SelectionTranslationCard from "./SelectionTranslationCard";
 import { Button } from "./ui/button";
-import { CommandShortcut, localizeCommandToOS } from "./ui/command";
+import { CommandShortcut } from "./ui/command";
+
+export type InlineMenuMode = "translation" | "actions";
 
 interface InlineAnnotationMenuProps {
     paperId?: string;
@@ -35,6 +37,7 @@ interface InlineAnnotationMenuProps {
     addHighlight: (selectedText: string, doAnnotate?: boolean) => void;
     removeHighlight: (highlight: PaperHighlight) => void;
     setUserMessageReferences: Dispatch<SetStateAction<string[]>>;
+    menuMode?: InlineMenuMode;
 }
 
 interface MenuLayout {
@@ -77,6 +80,14 @@ function normalizeKeyPart(value: string | number | null | undefined): string {
 
 function isCommandKey(event: KeyboardEvent, key: string): boolean {
     return event.key.toLowerCase() === key.toLowerCase() && (event.ctrlKey || event.metaKey);
+}
+
+function isEditableTarget(target: EventTarget | null): boolean {
+    const node = target as HTMLElement | null;
+    if (!node) return false;
+    if (node.isContentEditable) return true;
+    const tagName = node.tagName?.toLowerCase();
+    return tagName === "input" || tagName === "textarea" || tagName === "select";
 }
 
 function sameLayout(a: MenuLayout | null, b: MenuLayout): boolean {
@@ -169,6 +180,7 @@ export default function InlineAnnotationMenu(props: InlineAnnotationMenuProps) {
         addHighlight,
         removeHighlight,
         setUserMessageReferences,
+        menuMode = "translation",
     } = props;
 
     const menuRef = useRef<HTMLDivElement>(null);
@@ -178,6 +190,8 @@ export default function InlineAnnotationMenu(props: InlineAnnotationMenuProps) {
     const verticalPlacementRef = useRef<"above" | "below" | null>(null);
 
     const isMenuOpen = Boolean(tooltipPosition);
+    const effectiveMenuMode: InlineMenuMode = isHighlightInteraction ? "actions" : menuMode;
+    const isActionMenuMode = effectiveMenuMode === "actions";
     const [isMounted, setIsMounted] = useState(false);
     const [menuLayout, setMenuLayout] = useState<MenuLayout | null>(null);
 
@@ -215,6 +229,42 @@ export default function InlineAnnotationMenu(props: InlineAnnotationMenuProps) {
         selectedContextAfter,
         translateSelection,
     ]);
+
+    const handleCopy = useCallback(() => {
+        navigator.clipboard.writeText(selectedText);
+        closeMenu();
+    }, [closeMenu, selectedText]);
+
+    const handleSave = useCallback(() => {
+        addHighlight(selectedText, false);
+    }, [addHighlight, selectedText]);
+
+    const handleAnnotate = useCallback(() => {
+        setIsAnnotating(true);
+        setTooltipPosition(null);
+        setSelectedText("");
+        if (!isHighlightInteraction) {
+            addHighlight(selectedText, true);
+        }
+    }, [
+        addHighlight,
+        isHighlightInteraction,
+        selectedText,
+        setIsAnnotating,
+        setSelectedText,
+        setTooltipPosition,
+    ]);
+
+    const handleAsk = useCallback(() => {
+        setUserMessageReferences((prev) => Array.from(new Set([...prev, selectedText])));
+        closeMenu();
+    }, [closeMenu, selectedText, setUserMessageReferences]);
+
+    const handleDelete = useCallback(() => {
+        if (!activeHighlight) return;
+        removeHighlight(activeHighlight);
+        closeMenu();
+    }, [activeHighlight, closeMenu, removeHighlight]);
 
     const calculateMenuLayout = useCallback(() => {
         if (!tooltipPosition) {
@@ -339,6 +389,12 @@ export default function InlineAnnotationMenu(props: InlineAnnotationMenuProps) {
     }, [isMounted, tooltipPosition, calculateMenuLayout]);
 
     useEffect(() => {
+        if (effectiveMenuMode !== "translation") {
+            lastAutoTranslateKeyRef.current = "";
+            clearTranslation();
+            return;
+        }
+
         if (isSelectionInProgress) {
             lastAutoTranslateKeyRef.current = "";
             clearTranslation();
@@ -377,34 +433,48 @@ export default function InlineAnnotationMenu(props: InlineAnnotationMenuProps) {
         selectedContextBefore,
         selectedContextAfter,
         isMenuOpen,
+        effectiveMenuMode,
         isSelectionInProgress,
         requestTranslation,
         clearTranslation,
     ]);
 
     useEffect(() => {
-        const handleKeyDown = (event: KeyboardEvent) => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+            if (!isMenuOpen || isEditableTarget(event.target) || event.repeat) {
+                return;
+            }
+
             if (event.key === "Escape") {
                 closeMenu();
-            } else if (isCommandKey(event, "c")) {
-                navigator.clipboard.writeText(selectedText);
-            } else if (isCommandKey(event, "a")) {
-                setUserMessageReferences((prev) => Array.from(new Set([...prev, selectedText])));
-            } else if (paperId && isCommandKey(event, "t")) {
-                requestTranslation(true);
-            } else if (isCommandKey(event, "h")) {
-                addHighlight(selectedText);
+            } else if (!isActionMenuMode) {
+                if (paperId && isCommandKey(event, "t")) {
+                    requestTranslation(true);
+                } else {
+                    return;
+                }
             } else if (
-                isCommandKey(event, "d")
-                && isHighlightInteraction
-                && activeHighlight
+                isActionMenuMode
+                && !event.metaKey
+                && !event.ctrlKey
+                && !event.altKey
             ) {
-                removeHighlight(activeHighlight);
-                closeMenu();
-            } else if (isCommandKey(event, "e")) {
-                setIsAnnotating(true);
-                setTooltipPosition(null);
-                setSelectedText("");
+                const key = event.key.toLowerCase();
+                if (key === "c") {
+                    handleCopy();
+                } else if (key === "s" && !isHighlightInteraction) {
+                    handleSave();
+                } else if (key === "n") {
+                    handleAnnotate();
+                } else if (key === "a") {
+                    handleAsk();
+                } else if (key === "d" && isHighlightInteraction && activeHighlight) {
+                    handleDelete();
+                } else if (key === "x") {
+                    closeMenu();
+                } else {
+                    return;
+                }
             } else {
                 return;
             }
@@ -417,17 +487,18 @@ export default function InlineAnnotationMenu(props: InlineAnnotationMenuProps) {
         return () => window.removeEventListener("keydown", handleKeyDown);
     }, [
         paperId,
+        isMenuOpen,
+        isActionMenuMode,
         selectedText,
         isHighlightInteraction,
         activeHighlight,
         closeMenu,
         requestTranslation,
-        addHighlight,
-        removeHighlight,
-        setUserMessageReferences,
-        setIsAnnotating,
-        setSelectedText,
-        setTooltipPosition,
+        handleAsk,
+        handleAnnotate,
+        handleCopy,
+        handleDelete,
+        handleSave,
     ]);
 
     if (!tooltipPosition || !menuLayout || !isMounted) return null;
@@ -440,7 +511,13 @@ export default function InlineAnnotationMenu(props: InlineAnnotationMenuProps) {
         <div
             ref={menuRef}
             data-testid="inline-annotation-menu"
-            className="fixed z-[2147483000] overflow-y-auto rounded-lg border border-border bg-background p-3 shadow-lg"
+            data-menu-mode={effectiveMenuMode}
+            className={[
+                "fixed z-[2147483000] overflow-y-auto",
+                isActionMenuMode
+                    ? "rounded-lg border border-border bg-background p-3 shadow-lg"
+                    : "border-0 bg-transparent p-0 shadow-none",
+            ].join(" ")}
             style={{
                 left: `${menuLayout.left}px`,
                 top: `${menuLayout.top}px`,
@@ -452,92 +529,81 @@ export default function InlineAnnotationMenu(props: InlineAnnotationMenuProps) {
             onMouseDown={(e) => e.stopPropagation()}
         >
             <div className="flex flex-col gap-1.5">
-                <MenuItemButton
-                    icon={<Copy size={14} />}
-                    label="Copy"
-                    shortcut={localizeCommandToOS("C")}
-                    onClick={() => {
-                        navigator.clipboard.writeText(selectedText);
-                        closeMenu();
-                    }}
-                />
+                {isActionMenuMode ? (
+                    <>
+                        <div className="px-1 text-[11px] text-muted-foreground" data-testid="inline-action-mode">
+                            Action mode: press a key to execute
+                        </div>
+                        <MenuItemButton
+                            icon={<Copy size={14} />}
+                            label="Copy"
+                            shortcut="C"
+                            testId="inline-action-copy"
+                            onClick={handleCopy}
+                        />
 
-                {!isHighlightInteraction && (
-                    <MenuItemButton
-                        icon={<Bookmark size={14} />}
-                        label="Save"
-                        shortcut={localizeCommandToOS("H")}
-                        onMouseDown={preventMouseDown}
-                        onClick={() => addHighlight(selectedText, false)}
-                    />
+                        {!isHighlightInteraction && (
+                            <MenuItemButton
+                                icon={<Bookmark size={14} />}
+                                label="Save"
+                                shortcut="S"
+                                testId="inline-action-save"
+                                onMouseDown={preventMouseDown}
+                                onClick={handleSave}
+                            />
+                        )}
+
+                        <MenuItemButton
+                            icon={<Highlighter size={14} />}
+                            label="Annotate"
+                            shortcut="N"
+                            testId="inline-action-annotate"
+                            onMouseDown={preventMouseDown}
+                            onClick={handleAnnotate}
+                        />
+
+                        <MenuItemButton
+                            icon={<MessageCircle size={14} />}
+                            label="Ask"
+                            shortcut="A"
+                            testId="inline-action-ask"
+                            onMouseDown={preventMouseDown}
+                            onClick={handleAsk}
+                        />
+
+                        {isHighlightInteraction && activeHighlight && (
+                            <MenuItemButton
+                                icon={<Minus size={14} />}
+                                label="Delete"
+                                shortcut="D"
+                                testId="inline-action-delete"
+                                destructive
+                                onMouseDown={preventMouseDown}
+                                onClick={handleDelete}
+                            />
+                        )}
+
+                        <MenuItemButton
+                            icon={<X size={14} />}
+                            label="Close"
+                            shortcut="Esc"
+                            testId="inline-action-close"
+                            onClick={closeMenu}
+                        />
+                    </>
+                ) : (
+                    <div data-testid="inline-translation-window">
+                        <SelectionTranslationCard
+                            translation={translation}
+                            isLoading={isTranslating}
+                            error={translationError}
+                            standalone
+                            onRetry={() => {
+                                void retryLast();
+                            }}
+                        />
+                    </div>
                 )}
-
-                <MenuItemButton
-                    icon={<Highlighter size={14} />}
-                    label="Annotate"
-                    shortcut={localizeCommandToOS("E")}
-                    onMouseDown={preventMouseDown}
-                    onClick={() => {
-                        setIsAnnotating(true);
-                        setTooltipPosition(null);
-                        setSelectedText("");
-                        if (!isHighlightInteraction) {
-                            addHighlight(selectedText, true);
-                        }
-                    }}
-                />
-
-                <MenuItemButton
-                    icon={<MessageCircle size={14} />}
-                    label="Ask"
-                    shortcut={localizeCommandToOS("A")}
-                    onMouseDown={preventMouseDown}
-                    onClick={() => {
-                        setUserMessageReferences((prev) => Array.from(new Set([...prev, selectedText])));
-                        closeMenu();
-                    }}
-                />
-
-                {paperId && (
-                    <MenuItemButton
-                        icon={<Languages size={14} />}
-                        label="Translate"
-                        shortcut={localizeCommandToOS("T")}
-                        testId="inline-translate-button"
-                        onMouseDown={preventMouseDown}
-                        onClick={() => requestTranslation(true)}
-                    />
-                )}
-
-                {isHighlightInteraction && activeHighlight && (
-                    <MenuItemButton
-                        icon={<Minus size={14} />}
-                        label="Delete"
-                        shortcut={localizeCommandToOS("D")}
-                        destructive
-                        onMouseDown={preventMouseDown}
-                        onClick={() => {
-                            removeHighlight(activeHighlight);
-                            closeMenu();
-                        }}
-                    />
-                )}
-
-                <MenuItemButton
-                    icon={<X size={14} />}
-                    label="Close"
-                    shortcut="Esc"
-                    onClick={closeMenu}
-                />
-
-                <SelectionTranslationCard
-                    translation={translation}
-                    isLoading={isTranslating}
-                    error={translationError}
-                    onRetry={() => {
-                        void retryLast();
-                    }}
-                />
             </div>
         </div>
     );

@@ -67,14 +67,114 @@ test("shows translation card for selected word and expands details", async ({ pa
     await page.goto("/translation-e2e");
 
     await expect(page.getByTestId("inline-annotation-menu")).toBeVisible();
+    await expect(page.getByTestId("inline-annotation-menu")).toHaveAttribute("data-menu-mode", "translation");
+    await expect(page.getByTestId("inline-translation-window")).toBeVisible();
+    await expect(page.getByTestId("inline-action-mode")).toHaveCount(0);
+    await expect(page.getByTestId("inline-action-copy")).toHaveCount(0);
     const card = page.getByTestId("selection-translation-card");
     await expect(card).toBeVisible();
+    await expect(card).toHaveClass(/bg-background\/95/);
     await expect(card).toContainText("在本文中表示降低不利影响");
-    await expect.poll(() => translateCalls).toBe(1);
-
-    await page.getByTestId("selection-translation-toggle").click();
     await expect(page.getByText("POS:")).toBeVisible();
     await expect(page.getByText("mitigate risk")).toBeVisible();
+    await expect(page.getByTestId("selection-translation-toggle")).toHaveCount(0);
+    await expect.poll(() => translateCalls).toBe(1);
+});
+
+test("long selection is trimmed to limit and still translated", async ({ page }) => {
+    const requestLengths: number[] = [];
+
+    await page.route("**/api/translate/selection", async (route) => {
+        const body = route.request().postDataJSON() as { selected_text?: string };
+        requestLengths.push((body.selected_text || "").length);
+        await route.fulfill({
+            status: 200,
+            contentType: "application/json",
+            body: JSON.stringify(mockSentenceResponse()),
+        });
+    });
+
+    await page.goto("/translation-e2e");
+    await page.getByTestId("translation-e2e-long-case").click();
+
+    const card = page.getByTestId("selection-translation-card");
+    await expect(card).toBeVisible();
+    await expect(card).toContainText("跨域泛化能力");
+    await expect.poll(() => requestLengths.some((len) => len === 5000)).toBeTruthy();
+});
+
+test("action mode disables auto translation", async ({ page }) => {
+    let translateCalls = 0;
+    await page.route("**/api/translate/selection", async (route) => {
+        translateCalls += 1;
+        await route.fulfill({
+            status: 200,
+            contentType: "application/json",
+            body: JSON.stringify(mockWordResponse()),
+        });
+    });
+
+    await page.goto("/translation-e2e");
+    await expect(page.getByTestId("selection-translation-card")).toBeVisible();
+    await expect.poll(() => translateCalls).toBe(1);
+
+    await page.evaluate(() => {
+        const button = document.querySelector('[data-testid="translation-e2e-mode-actions"]') as HTMLButtonElement | null;
+        button?.click();
+    });
+    const menu = page.getByTestId("inline-annotation-menu");
+    await expect(menu).toHaveAttribute("data-menu-mode", "actions");
+    await expect(page.getByTestId("inline-action-mode")).toBeVisible();
+    await expect(page.getByTestId("selection-translation-card")).toHaveCount(0);
+
+    await page.getByTestId("translation-e2e-move-tooltip").click({ force: true });
+    await page.getByTestId("translation-e2e-reopen").click({ force: true });
+    await page.waitForTimeout(500);
+    await expect.poll(() => translateCalls).toBe(1);
+});
+
+test("action mode supports plain-key actions without modifiers", async ({ page }) => {
+    await page.route("**/api/translate/selection", async (route) => {
+        await route.fulfill({
+            status: 200,
+            contentType: "application/json",
+            body: JSON.stringify(mockWordResponse()),
+        });
+    });
+
+    await page.goto("/translation-e2e");
+    await expect(page.getByTestId("inline-annotation-menu")).toBeVisible();
+
+    await page.evaluate(() => {
+        const button = document.querySelector('[data-testid="translation-e2e-mode-actions"]') as HTMLButtonElement | null;
+        button?.click();
+    });
+    await expect(page.getByTestId("inline-annotation-menu")).toHaveAttribute("data-menu-mode", "actions");
+
+    await page.keyboard.press("s");
+    await expect(page.getByTestId("translation-e2e-highlight-count")).toContainText("1");
+
+    await page.evaluate(() => {
+        const button = document.querySelector('[data-testid="translation-e2e-mode-actions"]') as HTMLButtonElement | null;
+        button?.click();
+    });
+    await page.getByRole("button", { name: "Word Case" }).click({ force: true });
+    await page.evaluate(() => {
+        const button = document.querySelector('[data-testid="translation-e2e-mode-actions"]') as HTMLButtonElement | null;
+        button?.click();
+    });
+    await expect(page.getByTestId("inline-annotation-menu")).toBeVisible();
+    await page.keyboard.press("a");
+    await expect(page.getByTestId("translation-e2e-reference-count")).toContainText("1");
+
+    await page.getByRole("button", { name: "Word Case" }).click({ force: true });
+    await page.evaluate(() => {
+        const button = document.querySelector('[data-testid="translation-e2e-mode-actions"]') as HTMLButtonElement | null;
+        button?.click();
+    });
+    await expect(page.getByTestId("inline-annotation-menu")).toBeVisible();
+    await page.keyboard.press("n");
+    await expect(page.getByTestId("translation-e2e-annotating")).toContainText("yes");
 });
 
 test("menu position follows tooltip updates", async ({ page }) => {
@@ -93,11 +193,15 @@ test("menu position follows tooltip updates", async ({ page }) => {
     const before = await menu.boundingBox();
     expect(before).not.toBeNull();
 
-    await page.getByTestId("translation-e2e-move-tooltip").click({ force: true });
+    await page.evaluate(() => {
+        const button = document.querySelector('[data-testid="translation-e2e-move-tooltip"]') as HTMLButtonElement | null;
+        button?.click();
+    });
     await expect(page.getByTestId("translation-e2e-tooltip-position")).toContainText("620,240");
 
     const after = await menu.boundingBox();
     expect(after).not.toBeNull();
+    expect(after!.x).toBeGreaterThanOrEqual(620);
     expect(after!.x).toBeGreaterThan(before!.x + 120);
     expect(after!.y).toBeGreaterThan(before!.y + 80);
 });

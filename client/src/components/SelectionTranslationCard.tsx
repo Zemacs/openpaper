@@ -1,13 +1,13 @@
-import { useEffect, useState } from "react";
 import { SelectionTranslationResponse } from "@/lib/schema";
 import { Button } from "./ui/button";
-import { ChevronDown, ChevronUp, Loader, RotateCcw } from "lucide-react";
+import { Loader, RotateCcw } from "lucide-react";
 
 interface SelectionTranslationCardProps {
     translation: SelectionTranslationResponse | null;
     isLoading: boolean;
     error: string | null;
     onRetry: () => void;
+    standalone?: boolean;
 }
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -22,18 +22,23 @@ export default function SelectionTranslationCard({
     isLoading,
     error,
     onRetry,
+    standalone = false,
 }: SelectionTranslationCardProps) {
-    const [expanded, setExpanded] = useState(false);
-
-    useEffect(() => {
-        setExpanded(false);
-    }, [translation?.source_text, translation?.mode]);
+    const containerClass = standalone
+        ? "rounded-xl border border-border bg-background/95 p-3 text-xs shadow-xl backdrop-blur-sm"
+        : "mt-2 rounded-md border border-border bg-muted/30 p-2 text-xs";
+    const errorContainerClass = standalone
+        ? "rounded-xl border border-destructive/40 bg-background/95 p-3 text-xs shadow-xl backdrop-blur-sm"
+        : "mt-2 rounded-md border border-destructive/30 bg-destructive/5 p-2 text-xs";
+    const loadingContainerClass = standalone
+        ? "rounded-xl border border-border bg-background/95 p-3 text-xs text-muted-foreground shadow-xl backdrop-blur-sm"
+        : "mt-2 rounded-md border border-border bg-muted/30 p-2 text-xs text-muted-foreground";
 
     if (isLoading) {
         return (
             <div
                 data-testid="selection-translation-loading"
-                className="mt-2 rounded-md border border-border bg-muted/30 p-2 text-xs text-muted-foreground"
+                className={loadingContainerClass}
             >
                 <div className="flex items-center gap-2">
                     <Loader size={12} className="animate-spin" />
@@ -47,7 +52,7 @@ export default function SelectionTranslationCard({
         return (
             <div
                 data-testid="selection-translation-error"
-                className="mt-2 rounded-md border border-destructive/30 bg-destructive/5 p-2 text-xs"
+                className={errorContainerClass}
             >
                 <div className="text-destructive">{error}</div>
                 <Button
@@ -98,7 +103,7 @@ export default function SelectionTranslationCard({
     return (
         <div
             data-testid="selection-translation-card"
-            className="mt-2 rounded-md border border-border bg-muted/30 p-2 text-xs"
+            className={containerClass}
         >
             <div className="mb-1 flex items-center justify-between text-[11px] text-muted-foreground">
                 <span>Translation</span>
@@ -132,74 +137,61 @@ export default function SelectionTranslationCard({
                 <div className="text-muted-foreground">{explain}</div>
             )}
 
-            <Button
-                data-testid="selection-translation-toggle"
-                variant="ghost"
-                size="sm"
-                className="mt-1 h-7 px-2 text-[11px]"
-                onClick={() => setExpanded((v) => !v)}
-            >
-                {expanded ? <ChevronUp size={12} className="mr-1" /> : <ChevronDown size={12} className="mr-1" />}
-                {expanded ? "Less" : "More"}
-            </Button>
+            <div className="mt-1 space-y-1 border-t border-border/60 pt-1 text-muted-foreground">
+                {pos && (
+                    <div>
+                        <span className="font-medium text-foreground">POS:</span> {pos}
+                    </div>
+                )}
 
-            {expanded && (
-                <div className="mt-1 space-y-1 border-t border-border/60 pt-1 text-muted-foreground">
-                    {pos && (
-                        <div>
-                            <span className="font-medium text-foreground">POS:</span> {pos}
-                        </div>
-                    )}
+                {usageNotes.length > 0 && (
+                    <div>
+                        <span className="font-medium text-foreground">Usage:</span> {usageNotes.join("；")}
+                    </div>
+                )}
 
-                    {usageNotes.length > 0 && (
-                        <div>
-                            <span className="font-medium text-foreground">Usage:</span> {usageNotes.join("；")}
-                        </div>
-                    )}
+                {collocations.length > 0 && (
+                    <div>
+                        <span className="font-medium text-foreground">Collocations:</span> {collocations.join(", ")}
+                    </div>
+                )}
 
-                    {collocations.length > 0 && (
-                        <div>
-                            <span className="font-medium text-foreground">Collocations:</span> {collocations.join(", ")}
-                        </div>
-                    )}
+                {keyTerms.length > 0 && (
+                    <div>
+                        <span className="font-medium text-foreground">Key terms:</span>{" "}
+                        {keyTerms
+                            .filter((term) => term.en || term.cn)
+                            .map((term) => `${term.en || ""}→${term.cn || ""}`)
+                            .join("；")}
+                    </div>
+                )}
 
-                    {keyTerms.length > 0 && (
-                        <div>
-                            <span className="font-medium text-foreground">Key terms:</span>{" "}
-                            {keyTerms
-                                .filter((term) => term.en || term.cn)
-                                .map((term) => `${term.en || ""}→${term.cn || ""}`)
-                                .join("；")}
-                        </div>
-                    )}
+                {literal && (
+                    <div>
+                        <span className="font-medium text-foreground">Literal:</span> {literal}
+                    </div>
+                )}
 
-                    {literal && (
-                        <div>
-                            <span className="font-medium text-foreground">Literal:</span> {literal}
-                        </div>
-                    )}
+                {symbolsNotes.length > 0 && (
+                    <div>
+                        <span className="font-medium text-foreground">Symbols:</span> {symbolsNotes.join("；")}
+                    </div>
+                )}
 
-                    {symbolsNotes.length > 0 && (
-                        <div>
-                            <span className="font-medium text-foreground">Symbols:</span> {symbolsNotes.join("；")}
-                        </div>
-                    )}
+                {(contextExampleCn || contextExampleEn) && (
+                    <div>
+                        <span className="font-medium text-foreground">Context example:</span>{" "}
+                        {[contextExampleEn, contextExampleCn].filter(Boolean).join(" / ")}
+                    </div>
+                )}
 
-                    {(contextExampleCn || contextExampleEn) && (
-                        <div>
-                            <span className="font-medium text-foreground">Context example:</span>{" "}
-                            {[contextExampleEn, contextExampleCn].filter(Boolean).join(" / ")}
-                        </div>
-                    )}
-
-                    {(generalExampleCn || generalExampleEn) && (
-                        <div>
-                            <span className="font-medium text-foreground">General example:</span>{" "}
-                            {[generalExampleEn, generalExampleCn].filter(Boolean).join(" / ")}
-                        </div>
-                    )}
-                </div>
-            )}
+                {(generalExampleCn || generalExampleEn) && (
+                    <div>
+                        <span className="font-medium text-foreground">General example:</span>{" "}
+                        {[generalExampleEn, generalExampleCn].filter(Boolean).join(" / ")}
+                    </div>
+                )}
+            </div>
         </div>
     );
 }

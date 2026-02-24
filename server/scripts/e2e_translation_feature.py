@@ -17,6 +17,7 @@ from app.main import app
 TRANSLATION_GENERATE_PATCH_TARGET = (
     "app.llm.translation_operations.translation_operations.llm_client.generate_content_resilient"
 )
+MAX_SELECTED_TEXT_CHARS = int(os.getenv("TRANSLATION_MAX_SELECTED_TEXT_CHARS", "5000"))
 
 
 @dataclass
@@ -280,6 +281,31 @@ def run() -> int:
         r = client.post("/api/translate/selection", json=payload)
         _assert(r.status_code == 400, f"expected 400, got {r.status_code}")
 
+    def case_long_selection():
+        with patch(
+            TRANSLATION_GENERATE_PATCH_TARGET,
+            side_effect=fake_generate_content,
+        ):
+            long_selected_text = (
+                "While LLaDA2.1 balances decoding speed and quality, "
+                "the configurable threshold-decoding scheme still requires "
+                "context-aware refinement to preserve technical meaning. "
+            ) * 80
+            payload = {
+                "paper_id": paper_id,
+                "selected_text": long_selected_text,
+                "page_number": 1,
+                "selection_type_hint": "auto",
+                "target_language": "zh-CN",
+            }
+            r = client.post("/api/translate/selection", json=payload)
+            _assert(r.status_code == 200, f"long selection status={r.status_code}")
+            body = r.json()
+            _assert(
+                len(body["source_text"]) <= MAX_SELECTED_TEXT_CHARS,
+                "source_text should be truncated to configured max length",
+            )
+
     def case_quota_block():
         with patch("app.api.translation_api.can_user_run_chat", return_value=(False, "quota")):
             payload = {
@@ -469,6 +495,7 @@ def run() -> int:
     step("Word Translation + Cache", case_word_and_cache)
     step("Sentence Translation", case_sentence)
     step("Formula Translation", case_formula)
+    step("Long Selection Handling", case_long_selection)
     step("Invalid Input Handling", case_invalid_input)
     step("Quota Block Handling", case_quota_block)
     step("Subscription Usage Aggregation", case_usage_aggregation)
