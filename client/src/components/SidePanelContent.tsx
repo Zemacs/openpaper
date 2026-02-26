@@ -63,7 +63,13 @@ const TRANSIENT_STREAM_ERROR_MARKERS = [
     "network",
     "429",
     "503",
+    "aborterror",
+    "aborted",
 ];
+const CHAT_STREAM_READ_TIMEOUT_MS = 25000;
+const CHAT_STREAM_REQUEST_TIMEOUT_MS = 120000;
+const CHAT_STREAM_MAX_ATTEMPTS = 3;
+const CHAT_STREAM_RETRY_BASE_DELAY_MS = 1200;
 
 
 interface SidePanelContentProps {
@@ -93,12 +99,59 @@ interface SidePanelContentProps {
 
 interface ChatRequestBody {
     user_query: string;
-    conversation_id: string | null;
+    conversation_id: string;
     paper_id: string;
     user_references: string[];
     style?: ResponseStyle;
     llm_provider?: string;
 }
+
+interface StarterQuestionAction {
+    display: string;
+    prompt: string;
+}
+
+const COMPREHENSIVE_OVERVIEW_DISPLAY = "中文综合导读";
+const COMPREHENSIVE_OVERVIEW_PROMPT = [
+    "请基于论文正文内容，生成一份中文结构化导读。",
+    "输出要求：",
+    "1. 使用以下中文标题，并按顺序输出：一句话总结、研究问题与背景、方法与实验设计、核心结果（含关键数字）、局限性与适用边界、与相关工作的关系、阅读路径建议（先看哪些图表/章节）。",
+    "2. 每个部分 2-4 条要点，优先写可验证事实，避免空泛套话。",
+    "3. 对涉及结论、数字、对比结果的陈述添加引用 [^1]、[^2]。",
+    "4. 如果论文未明确给出某项信息，直接写“论文未明确给出”，不要猜测。",
+    "5. 全文使用简体中文，术语可保留英文原词并给出中文释义。",
+].join("\n");
+
+const DEFAULT_STARTER_QUESTION_ACTIONS: StarterQuestionAction[] = [
+    {
+        display: COMPREHENSIVE_OVERVIEW_DISPLAY,
+        prompt: COMPREHENSIVE_OVERVIEW_PROMPT,
+    },
+    {
+        display: "一句话总结这篇论文",
+        prompt: "请用简体中文给出这篇论文的一句话总结，并用 1-2 条关键证据支撑，附上引用标记 [^1]。",
+    },
+    {
+        display: "这篇论文的核心研究问题是什么？",
+        prompt: "请用简体中文说明这篇论文试图解决的核心问题或假设，并解释其研究背景与动机，附引用 [^n]。",
+    },
+    {
+        display: "作者采用了什么方法与实验设计？",
+        prompt: "请用简体中文概述论文的方法、数据、实验设置与评价指标。优先给出关键配置和可复现实验信息，附引用 [^n]。",
+    },
+    {
+        display: "关键结果与结论是什么？",
+        prompt: "请用简体中文总结论文最重要的实验结果与结论，包含关键数字或对比结果，并附引用 [^n]。",
+    },
+    {
+        display: "这项研究的主要局限性是什么？",
+        prompt: "请用简体中文总结论文明确提到的局限性、适用边界和潜在风险；若未明确说明请直接指出，附引用 [^n]。",
+    },
+    {
+        display: "它与相关工作有什么关系？",
+        prompt: "请用简体中文比较这篇论文与相关工作的差异、优势和不足，重点说明创新点与代价，并附引用 [^n]。",
+    },
+];
 
 export function SidePanelContent({
     rightSideFunction,
@@ -152,6 +205,7 @@ export function SidePanelContent({
     const inputMessageRef = useRef<HTMLTextAreaElement | null>(null);
     const messagesContainerRef = useRef<HTMLDivElement | null>(null);
     const pendingChatInputFocusRef = useRef(false);
+    const conversationBootstrapRef = useRef<Promise<string> | null>(null);
 
     const END_DELIMITER = "END_OF_STREAM";
 
@@ -185,24 +239,91 @@ export function SidePanelContent({
         return TRANSIENT_STREAM_ERROR_MARKERS.some(marker => message.includes(marker));
     }, []);
 
-    const COMPREHENSIVE_OVERVIEW_DISPLAY = "Create a comprehensive overview";
-    const COMPREHENSIVE_OVERVIEW_PROMPT = "Create a comprehensive, thoughtful brief for this paper. Separate each section with clear headings covering: Key Takeaways (the main points in 2-3 bullets), Background (the problem and context), Key Contributions (what's novel about this work), Methods (the approach taken), Results (main findings), Limitations (weaknesses of the study), Open Questions (gaps for future research), and Important Figures/Tables (which visuals to pay attention to). This should serve as a helpful guided reading before I dive into the paper myself.";
-
-    const defaultStarterQuestions = [
-        COMPREHENSIVE_OVERVIEW_DISPLAY,
-        "What is the main research question or hypothesis of this paper?",
-        "What methodology did the authors use?",
-        "What are the key findings and conclusions?",
-        "What are the limitations of this study?",
-        "How does this paper relate to other work in the field?",
-    ];
-
-    const starterQuestions = useMemo(() => {
-        if (paperData?.starter_questions && paperData.starter_questions.length > 0) {
-            return paperData.starter_questions;
+    const initializeConversation = useCallback(async (): Promise<string> => {
+        try {
+            const response = await fetchFromApi(`/api/paper/conversation?paper_id=${id}`, {
+                method: 'GET',
+            });
+            if (response?.id) {
+                return response.id;
+            }
+        } catch (error) {
+            const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
+            const isMissingConversation = message.includes("no conversations found");
+            if (!isMissingConversation) {
+                console.error('Error fetching conversation ID:', error);
+            }
         }
-        return defaultStarterQuestions;
-    }, [paperData?.starter_questions]);
+
+        const newConversationResponse = await fetchFromApi(`/api/conversation/paper/${id}`, {
+            method: 'POST',
+        });
+
+        if (!newConversationResponse?.id) {
+            throw new Error("Failed to create conversation.");
+        }
+
+        return newConversationResponse.id;
+    }, [id]);
+
+    const ensureConversationId = useCallback(async (): Promise<string> => {
+        if (conversationId) return conversationId;
+
+        if (!conversationBootstrapRef.current) {
+            conversationBootstrapRef.current = initializeConversation()
+                .then((resolvedId) => {
+                    setConversationId((prev) => prev || resolvedId);
+                    return resolvedId;
+                })
+                .finally(() => {
+                    conversationBootstrapRef.current = null;
+                });
+        }
+
+        return conversationBootstrapRef.current;
+    }, [conversationId, initializeConversation]);
+
+    const normalizeStarterQuestion = useCallback((question: string): string => {
+        return question
+            .toLowerCase()
+            .replace(/[`"'’‘”“.,!?;:()[\]{}<>|/_\-]+/g, " ")
+            .replace(/\s+/g, " ")
+            .trim();
+    }, []);
+
+    const starterQuestionActions = useMemo(() => {
+        const presetByAlias = new Map<string, StarterQuestionAction>([
+            ["create a comprehensive overview", DEFAULT_STARTER_QUESTION_ACTIONS[0]],
+            ["comprehensive overview", DEFAULT_STARTER_QUESTION_ACTIONS[0]],
+            ["one sentence summary", DEFAULT_STARTER_QUESTION_ACTIONS[1]],
+            ["single sentence summary", DEFAULT_STARTER_QUESTION_ACTIONS[1]],
+            ["what is the main research question or hypothesis of this paper", DEFAULT_STARTER_QUESTION_ACTIONS[2]],
+            ["what methodology did the authors use", DEFAULT_STARTER_QUESTION_ACTIONS[3]],
+            ["what are the key findings and conclusions", DEFAULT_STARTER_QUESTION_ACTIONS[4]],
+            ["what are the limitations of this study", DEFAULT_STARTER_QUESTION_ACTIONS[5]],
+            ["how does this paper relate to other work in the field", DEFAULT_STARTER_QUESTION_ACTIONS[6]],
+        ]);
+
+        const sourceQuestions = paperData?.starter_questions?.length
+            ? paperData.starter_questions
+            : DEFAULT_STARTER_QUESTION_ACTIONS.map((item) => item.display);
+
+        const resolved = sourceQuestions
+            .map((question) => {
+                const normalized = normalizeStarterQuestion(question);
+                const mapped = presetByAlias.get(normalized);
+                if (mapped) return mapped;
+                return { display: question, prompt: question };
+            })
+            .filter((item) => item.display.trim().length > 0);
+
+        const deduped = resolved.filter((item, index, list) => {
+            const key = normalizeStarterQuestion(item.display);
+            return list.findIndex((candidate) => normalizeStarterQuestion(candidate.display) === key) === index;
+        });
+
+        return deduped.length > 0 ? deduped : DEFAULT_STARTER_QUESTION_ACTIONS;
+    }, [normalizeStarterQuestion, paperData?.starter_questions]);
 
 
     const chatLoadingMessages = [
@@ -276,42 +397,19 @@ export function SidePanelContent({
 
 
     useEffect(() => {
+        setConversationId(null);
+        setMessages([]);
+        setPageNumberConversationHistory(1);
+        setHasMoreMessages(true);
+        setIsFetchingHistory(true);
+    }, [id]);
+
+    useEffect(() => {
         if (!paperData) return;
-
-        // Initialize conversation once paper data is available
-        async function fetchConversation() {
-            let retrievedConversationId = null;
-            try {
-                const response = await fetchFromApi(`/api/paper/conversation?paper_id=${id}`, {
-                    method: 'GET',
-                });
-
-                if (response && response.id) {
-                    retrievedConversationId = response.id;
-                }
-                setConversationId(retrievedConversationId);
-            } catch (error) {
-                console.error('Error fetching conversation ID:', error);
-
-                try {
-
-                    if (!retrievedConversationId) {
-                        // If no conversation ID is returned, create a new one
-                        const newConversationResponse = await fetchFromApi(`/api/conversation/paper/${id}`, {
-                            method: 'POST',
-                        });
-                        retrievedConversationId = newConversationResponse.id;
-                    }
-
-                    setConversationId(retrievedConversationId);
-                } catch (error) {
-                    console.error('Error fetching conversation:', error);
-                }
-            }
-        }
-
-        fetchConversation();
-    }, [paperData, id]);
+        void ensureConversationId().catch((error) => {
+            console.error('Error preparing conversation:', error);
+        });
+    }, [paperData, ensureConversationId]);
 
     useEffect(() => {
         if (user) {
@@ -474,6 +572,15 @@ export function SidePanelContent({
 
         if (!currentMessage.trim() || isStreaming) return;
 
+        let activeConversationId: string;
+        try {
+            activeConversationId = await ensureConversationId();
+        } catch (error) {
+            console.error('Error ensuring conversation before send:', error);
+            setErrorState({ failedUserMessage: currentMessage });
+            return;
+        }
+
         setErrorState(null);
 
         // Add user message to chat
@@ -496,7 +603,7 @@ export function SidePanelContent({
 
         const requestBody: ChatRequestBody = {
             user_query: userMessage.content,
-            conversation_id: conversationId,
+            conversation_id: activeConversationId,
             paper_id: id,
             user_references: userMessageReferences,
         };
@@ -510,21 +617,28 @@ export function SidePanelContent({
         }
 
         try {
-            const maxStreamAttempts = 2;
+            const maxStreamAttempts = CHAT_STREAM_MAX_ATTEMPTS;
             let accumulatedContent = '';
             let references: Reference | undefined = undefined;
 
             for (let attempt = 1; attempt <= maxStreamAttempts; attempt++) {
+                let requestTimeout: ReturnType<typeof window.setTimeout> | null = null;
                 try {
                     if (attempt > 1) {
                         setStreamingChunks([]);
                         setStreamingReferences(undefined);
                     }
 
+                    const abortController = new AbortController();
+                    requestTimeout = window.setTimeout(() => {
+                        abortController.abort();
+                    }, CHAT_STREAM_REQUEST_TIMEOUT_MS);
+
                     const stream = await fetchStreamFromApi('/api/message/chat/paper', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify(requestBody),
+                        signal: abortController.signal,
                     });
 
                     setUserMessageReferences([]);
@@ -541,7 +655,18 @@ export function SidePanelContent({
                     references = undefined;
 
                     while (true) {
-                        const { done, value } = await reader.read();
+                        let readTimeout: ReturnType<typeof window.setTimeout> | null = null;
+                        const readPromise = reader.read();
+                        const readTimeoutPromise = new Promise<never>((_, reject) => {
+                            readTimeout = window.setTimeout(() => {
+                                abortController.abort();
+                                reject(new Error('The read operation timed out'));
+                            }, CHAT_STREAM_READ_TIMEOUT_MS);
+                        });
+                        const { done, value } = await Promise.race([readPromise, readTimeoutPromise]);
+                        if (readTimeout) {
+                            window.clearTimeout(readTimeout);
+                        }
 
                         if (done) {
                             // Process any remaining buffer content
@@ -603,6 +728,9 @@ export function SidePanelContent({
                                     console.warn(`Unknown chunk type: ${chunkType}`);
                                 }
                             } catch (error) {
+                                if (error instanceof Error && error.message.startsWith("Server error:")) {
+                                    throw error;
+                                }
                                 console.error('Error processing event:', error, 'Raw event:', event);
                                 // Continue processing other events rather than breaking
                                 continue;
@@ -615,11 +743,18 @@ export function SidePanelContent({
                     console.log("Final references:", references);
                     break;
                 } catch (error) {
-                    const shouldRetry = attempt < maxStreamAttempts && isTransientStreamError(error);
+                    const normalizedError = error instanceof DOMException && error.name === 'AbortError'
+                        ? new Error('The read operation timed out')
+                        : error;
+                    const shouldRetry = attempt < maxStreamAttempts && isTransientStreamError(normalizedError);
                     if (!shouldRetry) {
-                        throw error;
+                        throw normalizedError;
                     }
-                    await new Promise(resolve => setTimeout(resolve, 700 * attempt));
+                    await new Promise(resolve => setTimeout(resolve, CHAT_STREAM_RETRY_BASE_DELAY_MS * attempt));
+                } finally {
+                    if (requestTimeout) {
+                        window.clearTimeout(requestTimeout);
+                    }
                 }
             }
 
@@ -646,7 +781,7 @@ export function SidePanelContent({
         } finally {
             setIsStreaming(false);
         }
-    }, [currentMessage, isStreaming, conversationId, id, userMessageReferences, selectedModel, responseStyle, transformReferencesToFormat, refetchSubscription, isTransientStreamError]);
+    }, [currentMessage, isStreaming, ensureConversationId, id, userMessageReferences, selectedModel, responseStyle, transformReferencesToFormat, refetchSubscription, isTransientStreamError]);
 
 
     const handleTextareaChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
@@ -658,7 +793,7 @@ export function SidePanelContent({
             handleSubmit(null);
             setPendingStarterQuestion(null);
         }
-    }, [pendingStarterQuestion]);
+    }, [pendingStarterQuestion, handleSubmit]);
 
 
     // Memoize expensive markdown components to prevent re-renders
@@ -1000,10 +1135,14 @@ export function SidePanelContent({
                                             )
                                         }
                                         {errorState && !isStreaming && (
-                                            <div className="relative group prose dark:prose-invert p-2 !max-w-full rounded-lg w-full text-primary dark:text-primary-foreground">
+                                            <div
+                                                data-testid="chat-stream-error"
+                                                className="relative group prose dark:prose-invert p-2 !max-w-full rounded-lg w-full text-primary dark:text-primary-foreground"
+                                            >
                                                 <div className="text-red-500">
                                                     <p>An error occurred while processing your request.</p>
                                                     <Button
+                                                        data-testid="chat-stream-retry"
                                                         variant="outline"
                                                         className="mt-2"
                                                         onClick={() => {
@@ -1090,13 +1229,12 @@ export function SidePanelContent({
                                     {(messages.length === 0 || messages.length === 1) && !hasMoreMessages && (
                                         <div className="text-center text-gray-500 my-4">
                                             <div className='flex overflow-x-auto gap-2 mt-2 pb-2 scrollbar-hide'>
-                                                {starterQuestions.slice(0, 5).map((question, i) => {
-                                                    const messageToSend = question === COMPREHENSIVE_OVERVIEW_DISPLAY
-                                                        ? COMPREHENSIVE_OVERVIEW_PROMPT
-                                                        : question;
+                                                {starterQuestionActions.slice(0, 5).map((item, i) => {
+                                                    const messageToSend = item.prompt;
                                                     return (
                                                         <Button
                                                             key={i}
+                                                            data-testid={`starter-question-${i}`}
                                                             variant="outline"
                                                             className="text-sm font-normal p-2 bg-background text-secondary-foreground hover:bg-secondary/50 border rounded-full whitespace-nowrap"
                                                             onClick={() => {
@@ -1110,7 +1248,7 @@ export function SidePanelContent({
                                                                 setPendingStarterQuestion(messageToSend);
                                                             }}
                                                         >
-                                                            {question}
+                                                            {item.display}
                                                         </Button>
                                                     );
                                                 })}

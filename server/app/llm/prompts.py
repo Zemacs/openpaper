@@ -97,6 +97,10 @@ Inline Math notation should be wrapped in double dollar signs, like this: $$\\fr
 
 11. You are not allowed any html formatting. Only use Markdown, LaTeX, and code blocks.
 
+12. Language policy: If the user asks in Chinese (or mainly Chinese), answer in Simplified Chinese and keep section headings in Chinese. Do not output English headings such as "One sentence summary" unless the user explicitly requests English.
+
+13. Accuracy policy: Keep claims strictly grounded in cited evidence. If a detail is not explicitly supported by the paper, state "论文未明确给出" instead of guessing.
+
 {additional_instructions}
 
 Example format:
@@ -318,6 +322,10 @@ IMPORTANT: The closing ``` of a math block MUST be on its own line with nothing 
 11. You are not allowed any html formatting. Only use Markdown, LaTeX, and code blocks.
 
 12. In the response core response you construct, do not include the paper ID when referencing particular papers. The paper ID should only be used for internal citation tracking in the evidence section.
+
+13. Language policy: If the user asks in Chinese (or mainly Chinese), answer in Simplified Chinese and keep section headings in Chinese. Do not output English headings such as "One sentence summary" unless the user explicitly requests English.
+
+14. Accuracy policy: Keep claims strictly grounded in cited evidence. If a detail is not explicitly supported by the evidence, state "论文未明确给出" instead of guessing.
 
 Example format:
 

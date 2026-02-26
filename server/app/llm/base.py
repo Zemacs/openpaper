@@ -37,7 +37,7 @@ class BaseLLMClient:
             0, int(os.getenv("LLM_CONTENT_RETRY_MAX", "1"))
         )
         self.stream_retry_max = max(
-            0, int(os.getenv("LLM_STREAM_RETRY_MAX", "2"))
+            0, int(os.getenv("LLM_STREAM_RETRY_MAX", "3"))
         )
         self.transient_retry_delay_seconds = max(
             0.1, float(os.getenv("LLM_TRANSIENT_RETRY_DELAY_SECONDS", "0.8"))
@@ -324,7 +324,14 @@ class BaseLLMClient:
                 if not should_retry:
                     raise
 
-                backoff = self.transient_retry_delay_seconds * (2**attempt)
+                error_text = str(e).lower()
+                if "429" in error_text or "too many requests" in error_text:
+                    # Busy/rate-limited providers typically need a longer cool-down.
+                    backoff = max(
+                        2.0, self.transient_retry_delay_seconds * (2 ** (attempt + 1))
+                    )
+                else:
+                    backoff = self.transient_retry_delay_seconds * (2**attempt)
                 logger.warning(
                     f"Transient stream error (attempt {attempt + 1}/{self.stream_retry_max + 1}): {type(e).__name__}: {str(e)[:120]}. Retrying in {backoff:.2f}s."
                 )
