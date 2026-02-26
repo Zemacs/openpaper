@@ -107,15 +107,7 @@ interface ModifierSnapshot {
 const DEFAULT_SELECTION_INTENT: SelectionIntent = "translate";
 
 function resolveSelectionIntent(modifiers: ModifierSnapshot): SelectionIntent {
-  if (modifiers.metaKey || modifiers.ctrlKey) {
-    return "quick-annotate";
-  }
-  if (modifiers.altKey) {
-    return "quick-highlight";
-  }
-  if (modifiers.shiftKey) {
-    return "actions";
-  }
+  void modifiers;
   return DEFAULT_SELECTION_INTENT;
 }
 
@@ -978,9 +970,7 @@ export function PdfHighlighterViewer(props: PdfHighlighterViewerProps) {
       const tooltipElement = document.querySelector(
         '[data-testid="inline-annotation-menu"]',
       );
-      if (!tooltipElement) return;
-
-      if (!tooltipElement.contains(e.target as Node)) {
+      if (!tooltipElement || !tooltipElement.contains(e.target as Node)) {
         setTimeout(() => {
           setIsHighlightInteraction(false);
           setSelectedText("");

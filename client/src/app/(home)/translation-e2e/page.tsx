@@ -1,6 +1,6 @@
 "use client";
 
-import InlineAnnotationMenu, { type InlineMenuMode } from "@/components/InlineAnnotationMenu";
+import InlineAnnotationMenu from "@/components/InlineAnnotationMenu";
 import { PaperHighlight } from "@/lib/schema";
 import { useSearchParams } from "next/navigation";
 import { useMemo, useState } from "react";
@@ -28,7 +28,6 @@ export default function TranslationE2EPage() {
     const [tooltipPosition, setTooltipPosition] = useState<{ x: number; y: number } | null>(
         TOOLTIP_POSITION,
     );
-    const [menuMode, setMenuMode] = useState<InlineMenuMode>("translation");
     const [isAnnotating, setIsAnnotating] = useState(false);
     const [isSelectionInProgress, setIsSelectionInProgress] = useState(false);
     const [highlights, setHighlights] = useState<PaperHighlight[]>([]);
@@ -71,7 +70,6 @@ export default function TranslationE2EPage() {
                         setSelectedText("mitigate");
                         setSelectedContextBefore("Our adaptation layer is designed to");
                         setSelectedContextAfter("domain shift under covariate changes.");
-                        setMenuMode("translation");
                         setTooltipPosition(TOOLTIP_POSITION);
                     }}
                 >
@@ -84,7 +82,6 @@ export default function TranslationE2EPage() {
                         setSelectedText("Our method improves cross-domain generalization.");
                         setSelectedContextBefore("In the out-of-domain benchmark,");
                         setSelectedContextAfter("without adding extra train-time cost.");
-                        setMenuMode("translation");
                         setTooltipPosition(TOOLTIP_POSITION);
                     }}
                 >
@@ -97,7 +94,6 @@ export default function TranslationE2EPage() {
                         setSelectedText("O(n^2)");
                         setSelectedContextBefore("The theoretical complexity remains");
                         setSelectedContextAfter("for dense graph construction.");
-                        setMenuMode("translation");
                         setTooltipPosition(TOOLTIP_POSITION);
                     }}
                 >
@@ -111,7 +107,6 @@ export default function TranslationE2EPage() {
                         setSelectedText(LONG_TEXT_SELECTION);
                         setSelectedContextBefore("This paragraph discusses decoding trade-offs where");
                         setSelectedContextAfter("and the authors report throughput and benchmark metrics.");
-                        setMenuMode("translation");
                         setTooltipPosition(TOOLTIP_POSITION);
                     }}
                 >
@@ -152,18 +147,13 @@ export default function TranslationE2EPage() {
                 <button
                     type="button"
                     className="rounded border px-3 py-1 text-sm"
-                    data-testid="translation-e2e-mode-translation"
-                    onClick={() => setMenuMode("translation")}
+                    data-testid="translation-e2e-clear-selection"
+                    onClick={() => {
+                        setSelectedText("");
+                        setTooltipPosition(null);
+                    }}
                 >
-                    Translation Mode
-                </button>
-                <button
-                    type="button"
-                    className="rounded border px-3 py-1 text-sm"
-                    data-testid="translation-e2e-mode-actions"
-                    onClick={() => setMenuMode("actions")}
-                >
-                    Action Mode
+                    Clear Selection
                 </button>
             </div>
 
@@ -172,9 +162,6 @@ export default function TranslationE2EPage() {
             </p>
             <p className="mt-1 text-xs text-muted-foreground" data-testid="translation-e2e-tooltip-position">
                 Tooltip: {tooltipPosition ? `${tooltipPosition.x},${tooltipPosition.y}` : "closed"}
-            </p>
-            <p className="mt-1 text-xs text-muted-foreground" data-testid="translation-e2e-menu-mode">
-                Menu mode: {menuMode}
             </p>
             <p className="mt-1 text-xs text-muted-foreground" data-testid="translation-e2e-reference-count">
                 References captured: {userMessageReferences.length}
@@ -222,7 +209,7 @@ export default function TranslationE2EPage() {
                     setActiveHighlight(null);
                 }}
                 setUserMessageReferences={setUserMessageReferences}
-                menuMode={menuMode}
+                menuMode="translation"
             />
 
             {isAnnotating && (

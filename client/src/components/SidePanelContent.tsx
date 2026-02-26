@@ -52,6 +52,7 @@ import { useAuth } from '@/lib/auth';
 import { useSubscription, getChatCreditUsagePercentage, isChatCreditAtLimit, isChatCreditNearLimit } from '@/hooks/useSubscription';
 import { Avatar, AvatarFallback, AvatarImage } from './ui/avatar';
 import { getAlphaHashToBackgroundColor, getInitials } from '@/lib/utils';
+import { FOCUS_CHAT_INPUT_EVENT } from '@/lib/events';
 
 const TRANSIENT_STREAM_ERROR_MARKERS = [
     "llm provider is busy",
@@ -150,8 +151,34 @@ export function SidePanelContent({
     const chatInputFormRef = useRef<HTMLFormElement | null>(null);
     const inputMessageRef = useRef<HTMLTextAreaElement | null>(null);
     const messagesContainerRef = useRef<HTMLDivElement | null>(null);
+    const pendingChatInputFocusRef = useRef(false);
 
     const END_DELIMITER = "END_OF_STREAM";
+
+    useEffect(() => {
+        const focusInput = () => {
+            pendingChatInputFocusRef.current = true;
+            if (rightSideFunction === "Chat") {
+                requestAnimationFrame(() => {
+                    inputMessageRef.current?.focus();
+                    pendingChatInputFocusRef.current = false;
+                });
+            }
+        };
+
+        window.addEventListener(FOCUS_CHAT_INPUT_EVENT, focusInput);
+        return () => window.removeEventListener(FOCUS_CHAT_INPUT_EVENT, focusInput);
+    }, [rightSideFunction]);
+
+    useEffect(() => {
+        if (rightSideFunction !== "Chat" || !pendingChatInputFocusRef.current) {
+            return;
+        }
+        requestAnimationFrame(() => {
+            inputMessageRef.current?.focus();
+            pendingChatInputFocusRef.current = false;
+        });
+    }, [rightSideFunction]);
 
     const isTransientStreamError = useCallback((error: unknown): boolean => {
         const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();

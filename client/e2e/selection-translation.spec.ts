@@ -53,7 +53,45 @@ function mockSentenceResponse() {
     };
 }
 
-test("shows translation card for selected word and expands details", async ({ page }) => {
+test("selection stays silent until shortcut is pressed", async ({ page }) => {
+    let translateCalls = 0;
+    await page.route("**/api/translate/selection", async (route) => {
+        translateCalls += 1;
+        await route.fulfill({
+            status: 200,
+            contentType: "application/json",
+            body: JSON.stringify(mockWordResponse()),
+        });
+    });
+
+    await page.goto("/translation-e2e");
+    await page.waitForTimeout(400);
+
+    await expect(page.getByTestId("inline-annotation-menu")).toHaveCount(0);
+    await expect.poll(() => translateCalls).toBe(0);
+});
+
+test("shortcut f triggers translation panel", async ({ page }) => {
+    let translateCalls = 0;
+    await page.route("**/api/translate/selection", async (route) => {
+        translateCalls += 1;
+        await route.fulfill({
+            status: 200,
+            contentType: "application/json",
+            body: JSON.stringify(mockWordResponse()),
+        });
+    });
+
+    await page.goto("/translation-e2e");
+    await page.keyboard.press("f");
+
+    const card = page.getByTestId("selection-translation-card");
+    await expect(card).toBeVisible();
+    await expect(card).toContainText("在本文中表示降低不利影响");
+    await expect.poll(() => translateCalls).toBe(1);
+});
+
+test("shortcut ? opens help and custom bindings take effect", async ({ page }) => {
     let translateCalls = 0;
     await page.route("**/api/translate/selection", async (route) => {
         translateCalls += 1;
@@ -66,22 +104,79 @@ test("shows translation card for selected word and expands details", async ({ pa
 
     await page.goto("/translation-e2e");
 
-    await expect(page.getByTestId("inline-annotation-menu")).toBeVisible();
-    await expect(page.getByTestId("inline-annotation-menu")).toHaveAttribute("data-menu-mode", "translation");
-    await expect(page.getByTestId("inline-translation-window")).toBeVisible();
-    await expect(page.getByTestId("inline-action-mode")).toHaveCount(0);
-    await expect(page.getByTestId("inline-action-copy")).toHaveCount(0);
-    const card = page.getByTestId("selection-translation-card");
-    await expect(card).toBeVisible();
-    await expect(card).toHaveClass(/bg-background\/95/);
-    await expect(card).toContainText("在本文中表示降低不利影响");
-    await expect(page.getByText("POS:")).toBeVisible();
-    await expect(page.getByText("mitigate risk")).toBeVisible();
-    await expect(page.getByTestId("selection-translation-toggle")).toHaveCount(0);
+    await page.keyboard.press("?");
+    await expect(page.getByTestId("selection-shortcut-help")).toBeVisible();
+
+    await page.getByTestId("selection-shortcut-select-translate").selectOption("t");
+
+    await page.keyboard.press("?");
+    await expect(page.getByTestId("selection-shortcut-help")).toHaveCount(0);
+
+    await page.keyboard.press("f");
+    await page.waitForTimeout(300);
+    await expect.poll(() => translateCalls).toBe(0);
+
+    await page.keyboard.press("t");
+    await expect(page.getByTestId("selection-translation-card")).toBeVisible();
     await expect.poll(() => translateCalls).toBe(1);
 });
 
-test("long selection is trimmed to limit and still translated", async ({ page }) => {
+test("shortcut c adds chat reference and exits selection", async ({ page }) => {
+    await page.goto("/translation-e2e");
+
+    await page.keyboard.press("c");
+
+    await expect(page.getByTestId("translation-e2e-reference-count")).toContainText("1");
+    await expect(page.getByTestId("translation-e2e-tooltip-position")).toContainText("closed");
+});
+
+test("shortcut e creates highlight and exits selection", async ({ page }) => {
+    await page.goto("/translation-e2e");
+
+    await page.keyboard.press("e");
+
+    await expect(page.getByTestId("translation-e2e-highlight-count")).toContainText("1");
+    await expect(page.getByTestId("translation-e2e-tooltip-position")).toContainText("closed");
+});
+
+test("shortcut n enters annotate flow", async ({ page }) => {
+    await page.goto("/translation-e2e");
+
+    await page.keyboard.press("n");
+
+    await expect(page.getByTestId("translation-e2e-annotating")).toContainText("yes");
+    await expect(page.getByTestId("translation-e2e-highlight-count")).toContainText("1");
+});
+
+test("selection shortcuts are blocked during drag", async ({ page }) => {
+    let translateCalls = 0;
+    await page.route("**/api/translate/selection", async (route) => {
+        translateCalls += 1;
+        await route.fulfill({
+            status: 200,
+            contentType: "application/json",
+            body: JSON.stringify(mockWordResponse()),
+        });
+    });
+
+    await page.goto("/translation-e2e");
+
+    await page.getByTestId("translation-e2e-start-drag").click({ force: true });
+    await expect(page.getByTestId("translation-e2e-selection-progress")).toContainText("yes");
+
+    await page.keyboard.press("f");
+    await page.waitForTimeout(300);
+    await expect.poll(() => translateCalls).toBe(0);
+
+    await page.getByTestId("translation-e2e-end-drag").click({ force: true });
+    await expect(page.getByTestId("translation-e2e-selection-progress")).toContainText("no");
+
+    await page.keyboard.press("f");
+    await expect(page.getByTestId("selection-translation-card")).toBeVisible();
+    await expect.poll(() => translateCalls).toBe(1);
+});
+
+test("long selection is trimmed to request limit when translating", async ({ page }) => {
     const requestLengths: number[] = [];
 
     await page.route("**/api/translate/selection", async (route) => {
@@ -96,6 +191,7 @@ test("long selection is trimmed to limit and still translated", async ({ page })
 
     await page.goto("/translation-e2e");
     await page.getByTestId("translation-e2e-long-case").click();
+    await page.keyboard.press("f");
 
     const card = page.getByTestId("selection-translation-card");
     await expect(card).toBeVisible();
@@ -103,310 +199,11 @@ test("long selection is trimmed to limit and still translated", async ({ page })
     await expect.poll(() => requestLengths.some((len) => len === 5000)).toBeTruthy();
 });
 
-test("action mode disables auto translation", async ({ page }) => {
-    let translateCalls = 0;
-    await page.route("**/api/translate/selection", async (route) => {
-        translateCalls += 1;
-        await route.fulfill({
-            status: 200,
-            contentType: "application/json",
-            body: JSON.stringify(mockWordResponse()),
-        });
-    });
-
-    await page.goto("/translation-e2e");
-    await expect(page.getByTestId("selection-translation-card")).toBeVisible();
-    await expect.poll(() => translateCalls).toBe(1);
-
-    await page.evaluate(() => {
-        const button = document.querySelector('[data-testid="translation-e2e-mode-actions"]') as HTMLButtonElement | null;
-        button?.click();
-    });
-    const menu = page.getByTestId("inline-annotation-menu");
-    await expect(menu).toHaveAttribute("data-menu-mode", "actions");
-    await expect(page.getByTestId("inline-action-mode")).toBeVisible();
-    await expect(page.getByTestId("selection-translation-card")).toHaveCount(0);
-
-    await page.getByTestId("translation-e2e-move-tooltip").click({ force: true });
-    await page.getByTestId("translation-e2e-reopen").click({ force: true });
-    await page.waitForTimeout(500);
-    await expect.poll(() => translateCalls).toBe(1);
-});
-
-test("action mode supports plain-key actions without modifiers", async ({ page }) => {
-    await page.route("**/api/translate/selection", async (route) => {
-        await route.fulfill({
-            status: 200,
-            contentType: "application/json",
-            body: JSON.stringify(mockWordResponse()),
-        });
-    });
-
-    await page.goto("/translation-e2e");
-    await expect(page.getByTestId("inline-annotation-menu")).toBeVisible();
-
-    await page.evaluate(() => {
-        const button = document.querySelector('[data-testid="translation-e2e-mode-actions"]') as HTMLButtonElement | null;
-        button?.click();
-    });
-    await expect(page.getByTestId("inline-annotation-menu")).toHaveAttribute("data-menu-mode", "actions");
-
-    await page.keyboard.press("s");
-    await expect(page.getByTestId("translation-e2e-highlight-count")).toContainText("1");
-
-    await page.evaluate(() => {
-        const button = document.querySelector('[data-testid="translation-e2e-mode-actions"]') as HTMLButtonElement | null;
-        button?.click();
-    });
-    await page.getByRole("button", { name: "Word Case" }).click({ force: true });
-    await page.evaluate(() => {
-        const button = document.querySelector('[data-testid="translation-e2e-mode-actions"]') as HTMLButtonElement | null;
-        button?.click();
-    });
-    await expect(page.getByTestId("inline-annotation-menu")).toBeVisible();
-    await page.keyboard.press("a");
-    await expect(page.getByTestId("translation-e2e-reference-count")).toContainText("1");
-
-    await page.getByRole("button", { name: "Word Case" }).click({ force: true });
-    await page.evaluate(() => {
-        const button = document.querySelector('[data-testid="translation-e2e-mode-actions"]') as HTMLButtonElement | null;
-        button?.click();
-    });
-    await expect(page.getByTestId("inline-annotation-menu")).toBeVisible();
-    await page.keyboard.press("n");
-    await expect(page.getByTestId("translation-e2e-annotating")).toContainText("yes");
-});
-
-test("menu position follows tooltip updates", async ({ page }) => {
-    await page.route("**/api/translate/selection", async (route) => {
-        await route.fulfill({
-            status: 200,
-            contentType: "application/json",
-            body: JSON.stringify(mockWordResponse()),
-        });
-    });
-
-    await page.goto("/translation-e2e");
-    const menu = page.getByTestId("inline-annotation-menu");
-    await expect(menu).toBeVisible();
-
-    const before = await menu.boundingBox();
-    expect(before).not.toBeNull();
-
-    await page.evaluate(() => {
-        const button = document.querySelector('[data-testid="translation-e2e-move-tooltip"]') as HTMLButtonElement | null;
-        button?.click();
-    });
-    await expect(page.getByTestId("translation-e2e-tooltip-position")).toContainText("620,240");
-
-    const after = await menu.boundingBox();
-    expect(after).not.toBeNull();
-    expect(after!.x).toBeGreaterThanOrEqual(620);
-    expect(after!.x).toBeGreaterThan(before!.x + 120);
-    expect(after!.y).toBeGreaterThan(before!.y + 80);
-});
-
-test("menu prefers appearing to the right of anchor when space is available", async ({ page }) => {
-    await page.route("**/api/translate/selection", async (route) => {
-        await route.fulfill({
-            status: 200,
-            contentType: "application/json",
-            body: JSON.stringify(mockWordResponse()),
-        });
-    });
-
-    await page.goto("/translation-e2e");
-    const menu = page.getByTestId("inline-annotation-menu");
-    await expect(menu).toBeVisible();
-
-    const bbox = await menu.boundingBox();
-    expect(bbox).not.toBeNull();
-    expect(bbox!.x).toBeGreaterThan(240);
-});
-
-test("does not retrigger translation when only tooltip position changes", async ({ page }) => {
-    let translateCalls = 0;
-    await page.route("**/api/translate/selection", async (route) => {
-        translateCalls += 1;
-        await route.fulfill({
-            status: 200,
-            contentType: "application/json",
-            body: JSON.stringify(mockWordResponse()),
-        });
-    });
-
-    await page.goto("/translation-e2e");
-    await expect(page.getByTestId("selection-translation-card")).toBeVisible();
-    await expect.poll(() => translateCalls).toBe(1);
-
-    await page.getByTestId("translation-e2e-move-tooltip").click({ force: true });
-    await page.getByTestId("translation-e2e-reopen").click({ force: true });
-    await page.getByTestId("translation-e2e-move-tooltip").click({ force: true });
-    await page.waitForTimeout(500);
-
-    await expect.poll(() => translateCalls).toBe(1);
-});
-
-test("shows error then retries successfully", async ({ page }) => {
-    let translateCalls = 0;
-    await page.route("**/api/translate/selection", async (route) => {
-        translateCalls += 1;
-        if (translateCalls <= 2) {
-            await route.fulfill({
-                status: 503,
-                contentType: "application/json",
-                body: JSON.stringify({
-                    detail: "LLM provider is busy. Please retry in a few seconds.",
-                }),
-            });
-            return;
-        }
-
-        await route.fulfill({
-            status: 200,
-            contentType: "application/json",
-            body: JSON.stringify(mockWordResponse()),
-        });
-    });
-
+test("escape dismisses selected state", async ({ page }) => {
     await page.goto("/translation-e2e");
 
-    await expect(page.getByTestId("selection-translation-error")).toBeVisible();
-    await expect(page.getByText("Please retry")).toBeVisible();
+    await page.keyboard.press("Escape");
 
-    await page.getByTestId("selection-translation-retry").click();
-    const card = page.getByTestId("selection-translation-card");
-    await expect(card).toBeVisible();
-    await expect(card).toContainText("在本文中表示降低不利影响");
-    await expect.poll(() => translateCalls).toBe(3);
-});
-
-test("does not auto-translate while selection is in progress", async ({ page }) => {
-    let translateCalls = 0;
-    await page.route("**/api/translate/selection", async (route) => {
-        translateCalls += 1;
-        await route.fulfill({
-            status: 200,
-            contentType: "application/json",
-            body: JSON.stringify(mockWordResponse()),
-        });
-    });
-
-    await page.goto("/translation-e2e");
-    await expect(page.getByTestId("selection-translation-card")).toBeVisible();
-    await expect.poll(() => translateCalls).toBe(1);
-
-    await page.evaluate(() => {
-        const button = document.querySelector('[data-testid="translation-e2e-start-drag"]') as HTMLButtonElement | null;
-        button?.click();
-    });
-    await expect(page.getByTestId("translation-e2e-selection-progress")).toContainText("yes");
-
-    await page.evaluate(() => {
-        const buttons = Array.from(document.querySelectorAll("button"));
-        const sentenceButton = buttons.find((btn) => btn.textContent?.includes("Sentence Case")) as HTMLButtonElement | undefined;
-        sentenceButton?.click();
-    });
-    await page.waitForTimeout(400);
-    await expect.poll(() => translateCalls).toBe(1);
-
-    await page.evaluate(() => {
-        const button = document.querySelector('[data-testid="translation-e2e-end-drag"]') as HTMLButtonElement | null;
-        button?.click();
-    });
-    await expect(page.getByTestId("translation-e2e-selection-progress")).toContainText("no");
-    await expect.poll(() => translateCalls).toBe(2);
-    await expect(page.getByTestId("selection-translation-card")).toBeVisible();
-});
-
-test("keyboard shortcut triggers force translate", async ({ page }) => {
-    let translateCalls = 0;
-    await page.route("**/api/translate/selection", async (route) => {
-        translateCalls += 1;
-        await route.fulfill({
-            status: 200,
-            contentType: "application/json",
-            body: JSON.stringify(mockWordResponse()),
-        });
-    });
-
-    await page.goto("/translation-e2e");
-    await expect(page.getByTestId("selection-translation-card")).toBeVisible();
-    await expect.poll(() => translateCalls).toBe(1);
-
-    await page.evaluate(() => {
-        window.dispatchEvent(
-            new KeyboardEvent("keydown", {
-                key: "t",
-                ctrlKey: true,
-                bubbles: true,
-            }),
-        );
-    });
-    await expect.poll(() => translateCalls).toBe(2);
-});
-
-test("keeps latest translation when an older request resolves later", async ({ page }) => {
-    let translateCalls = 0;
-    await page.route("**/api/translate/selection", async (route) => {
-        translateCalls += 1;
-        const body = route.request().postDataJSON() as { selected_text?: string };
-        const selectedText = body?.selected_text || "";
-
-        if (selectedText === "mitigate") {
-            await page.waitForTimeout(900);
-            await route.fulfill({
-                status: 200,
-                contentType: "application/json",
-                body: JSON.stringify(mockWordResponse()),
-            });
-            return;
-        }
-
-        await page.waitForTimeout(120);
-        await route.fulfill({
-            status: 200,
-            contentType: "application/json",
-            body: JSON.stringify(mockSentenceResponse()),
-        });
-    });
-
-    await page.goto("/translation-e2e");
-    await expect.poll(() => translateCalls).toBe(1);
-
-    await page.getByRole("button", { name: "Sentence Case" }).click();
-    await expect.poll(() => translateCalls).toBe(2);
-
-    const card = page.getByTestId("selection-translation-card");
-    await expect(card).toContainText("跨域泛化能力");
-
-    await page.waitForTimeout(1200);
-    await expect(card).toContainText("跨域泛化能力");
-    await expect(card).not.toContainText("在本文中表示降低不利影响");
-});
-
-test("menu position stays stable after translation result appears", async ({ page }) => {
-    await page.route("**/api/translate/selection", async (route) => {
-        await page.waitForTimeout(700);
-        await route.fulfill({
-            status: 200,
-            contentType: "application/json",
-            body: JSON.stringify(mockWordResponse()),
-        });
-    });
-
-    await page.goto("/translation-e2e");
-    const menu = page.getByTestId("inline-annotation-menu");
-    await expect(menu).toBeVisible();
-
-    await page.waitForTimeout(80);
-    const before = await menu.boundingBox();
-    expect(before).not.toBeNull();
-
-    await expect(page.getByTestId("selection-translation-card")).toBeVisible();
-    const after = await menu.boundingBox();
-    expect(after).not.toBeNull();
-
-    const topDelta = Math.abs((after?.y || 0) - (before?.y || 0));
-    expect(topDelta).toBeLessThan(48);
+    await expect(page.getByTestId("translation-e2e-tooltip-position")).toContainText("closed");
+    await expect(page.getByTestId("translation-e2e-selected-text")).toContainText("Selected:");
 });

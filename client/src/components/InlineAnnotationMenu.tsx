@@ -13,8 +13,12 @@ import { createPortal } from "react-dom";
 import { Bookmark, Copy, Highlighter, MessageCircle, Minus, X } from "lucide-react";
 
 import { type PaperHighlight } from "@/lib/schema";
+import { FOCUS_CHAT_INPUT_EVENT } from "@/lib/events";
 
 import { useSelectionTranslation } from "./hooks/useSelectionTranslation";
+import { useSelectionShortcutConfig } from "./hooks/useSelectionShortcutConfig";
+import SelectionShortcutHelp from "./SelectionShortcutHelp";
+import { normalizeShortcutKeyFromKeyboardEvent } from "./selection-shortcuts";
 import SelectionTranslationCard from "./SelectionTranslationCard";
 import { Button } from "./ui/button";
 import { CommandShortcut } from "./ui/command";
@@ -72,14 +76,9 @@ const MENU_VIEWPORT_PADDING = 12;
 const FALLBACK_MENU_HEIGHT = 460;
 const MIN_VISIBLE_MENU_HEIGHT = 120;
 const MENU_ANCHOR_RESET_THRESHOLD = 12;
-const AUTO_TRANSLATE_DELAY_MS = 250;
 
 function normalizeKeyPart(value: string | number | null | undefined): string {
     return String(value || "").replace(/\s+/g, " ").trim().toLowerCase();
-}
-
-function isCommandKey(event: KeyboardEvent, key: string): boolean {
-    return event.key.toLowerCase() === key.toLowerCase() && (event.ctrlKey || event.metaKey);
 }
 
 function isEditableTarget(target: EventTarget | null): boolean {
@@ -184,7 +183,7 @@ export default function InlineAnnotationMenu(props: InlineAnnotationMenuProps) {
     } = props;
 
     const menuRef = useRef<HTMLDivElement>(null);
-    const lastAutoTranslateKeyRef = useRef("");
+    const lastSelectionKeyRef = useRef("");
     const lastAnchorRef = useRef<{ x: number; y: number } | null>(null);
     const horizontalPlacementRef = useRef<"right" | "left" | null>(null);
     const verticalPlacementRef = useRef<"above" | "below" | null>(null);
@@ -194,6 +193,15 @@ export default function InlineAnnotationMenu(props: InlineAnnotationMenuProps) {
     const isActionMenuMode = effectiveMenuMode === "actions";
     const [isMounted, setIsMounted] = useState(false);
     const [menuLayout, setMenuLayout] = useState<MenuLayout | null>(null);
+    const [isTranslationVisible, setIsTranslationVisible] = useState(false);
+    const [isHelpVisible, setIsHelpVisible] = useState(false);
+
+    const {
+        bindings,
+        configError,
+        updateBinding,
+        resetBindings,
+    } = useSelectionShortcutConfig();
 
     const {
         translation,
@@ -208,7 +216,10 @@ export default function InlineAnnotationMenu(props: InlineAnnotationMenuProps) {
         setSelectedText("");
         setTooltipPosition(null);
         setIsAnnotating(false);
-    }, [setIsAnnotating, setSelectedText, setTooltipPosition]);
+        setIsTranslationVisible(false);
+        setIsHelpVisible(false);
+        clearTranslation();
+    }, [clearTranslation, setIsAnnotating, setSelectedText, setTooltipPosition]);
 
     const requestTranslation = useCallback((force = false) => {
         if (!paperId) return;
@@ -237,7 +248,8 @@ export default function InlineAnnotationMenu(props: InlineAnnotationMenuProps) {
 
     const handleSave = useCallback(() => {
         addHighlight(selectedText, false);
-    }, [addHighlight, selectedText]);
+        closeMenu();
+    }, [addHighlight, closeMenu, selectedText]);
 
     const handleAnnotate = useCallback(() => {
         setIsAnnotating(true);
@@ -257,6 +269,7 @@ export default function InlineAnnotationMenu(props: InlineAnnotationMenuProps) {
 
     const handleAsk = useCallback(() => {
         setUserMessageReferences((prev) => Array.from(new Set([...prev, selectedText])));
+        window.dispatchEvent(new CustomEvent(FOCUS_CHAT_INPUT_EVENT));
         closeMenu();
     }, [closeMenu, selectedText, setUserMessageReferences]);
 
@@ -389,76 +402,72 @@ export default function InlineAnnotationMenu(props: InlineAnnotationMenuProps) {
     }, [isMounted, tooltipPosition, calculateMenuLayout]);
 
     useEffect(() => {
-        if (effectiveMenuMode !== "translation") {
-            lastAutoTranslateKeyRef.current = "";
-            clearTranslation();
-            return;
-        }
-
-        if (isSelectionInProgress) {
-            lastAutoTranslateKeyRef.current = "";
+        if (isActionMenuMode) {
+            setIsTranslationVisible(false);
+            setIsHelpVisible(false);
             clearTranslation();
             return;
         }
 
         const trimmedSelectedText = selectedText.trim();
-        if (!paperId || !isMenuOpen || !trimmedSelectedText) {
-            lastAutoTranslateKeyRef.current = "";
+        if (!isMenuOpen || !trimmedSelectedText) {
+            lastSelectionKeyRef.current = "";
+            setIsTranslationVisible(false);
+            setIsHelpVisible(false);
             clearTranslation();
             return;
         }
 
-        const requestKey = [
-            normalizeKeyPart(paperId),
+        const selectionKey = [
             normalizeKeyPart(trimmedSelectedText),
             normalizeKeyPart(selectedPageNumber),
             normalizeKeyPart(selectedContextBefore),
             normalizeKeyPart(selectedContextAfter),
         ].join("|");
 
-        if (requestKey === lastAutoTranslateKeyRef.current) {
-            return;
+        if (selectionKey !== lastSelectionKeyRef.current) {
+            lastSelectionKeyRef.current = selectionKey;
+            setIsTranslationVisible(false);
+            setIsHelpVisible(false);
+            clearTranslation();
         }
-
-        const timerId = window.setTimeout(() => {
-            lastAutoTranslateKeyRef.current = requestKey;
-            requestTranslation(false);
-        }, AUTO_TRANSLATE_DELAY_MS);
-
-        return () => window.clearTimeout(timerId);
     }, [
-        paperId,
         selectedText,
         selectedPageNumber,
         selectedContextBefore,
         selectedContextAfter,
         isMenuOpen,
-        effectiveMenuMode,
-        isSelectionInProgress,
-        requestTranslation,
+        isActionMenuMode,
         clearTranslation,
     ]);
 
     useEffect(() => {
-    const handleKeyDown = (event: KeyboardEvent) => {
+        const handleKeyDown = (event: KeyboardEvent) => {
             if (!isMenuOpen || isEditableTarget(event.target) || event.repeat) {
+                return;
+            }
+            if (event.isComposing) {
                 return;
             }
 
             if (event.key === "Escape") {
-                closeMenu();
-            } else if (!isActionMenuMode) {
-                if (paperId && isCommandKey(event, "t")) {
-                    requestTranslation(true);
-                } else {
+                if (isHelpVisible) {
+                    setIsHelpVisible(false);
+                    event.preventDefault();
+                    event.stopPropagation();
                     return;
                 }
-            } else if (
-                isActionMenuMode
-                && !event.metaKey
-                && !event.ctrlKey
-                && !event.altKey
-            ) {
+                closeMenu();
+                event.preventDefault();
+                event.stopPropagation();
+                return;
+            }
+
+            if (isActionMenuMode) {
+                if (event.metaKey || event.ctrlKey || event.altKey) {
+                    return;
+                }
+
                 const key = event.key.toLowerCase();
                 if (key === "c") {
                     handleCopy();
@@ -475,6 +484,33 @@ export default function InlineAnnotationMenu(props: InlineAnnotationMenuProps) {
                 } else {
                     return;
                 }
+                event.preventDefault();
+                event.stopPropagation();
+                return;
+            }
+
+            if (isSelectionInProgress || event.metaKey || event.ctrlKey || event.altKey) {
+                return;
+            }
+
+            const normalizedKey = normalizeShortcutKeyFromKeyboardEvent(event);
+            if (!normalizedKey) {
+                return;
+            }
+
+            if (normalizedKey === bindings.help) {
+                setIsHelpVisible((prev) => !prev);
+                setIsTranslationVisible(false);
+            } else if (normalizedKey === bindings.translate) {
+                setIsHelpVisible(false);
+                setIsTranslationVisible(true);
+                requestTranslation(false);
+            } else if (normalizedKey === bindings.chat) {
+                handleAsk();
+            } else if (normalizedKey === bindings.highlight) {
+                handleSave();
+            } else if (normalizedKey === bindings.annotate) {
+                handleAnnotate();
             } else {
                 return;
             }
@@ -493,6 +529,9 @@ export default function InlineAnnotationMenu(props: InlineAnnotationMenuProps) {
         isHighlightInteraction,
         activeHighlight,
         closeMenu,
+        isHelpVisible,
+        isSelectionInProgress,
+        bindings,
         requestTranslation,
         handleAsk,
         handleAnnotate,
@@ -502,6 +541,7 @@ export default function InlineAnnotationMenu(props: InlineAnnotationMenuProps) {
     ]);
 
     if (!tooltipPosition || !menuLayout || !isMounted) return null;
+    if (!isActionMenuMode && !isTranslationVisible && !isHelpVisible) return null;
 
     const preventMouseDown = (e: MouseEvent<HTMLButtonElement>) => {
         e.preventDefault();
@@ -591,6 +631,14 @@ export default function InlineAnnotationMenu(props: InlineAnnotationMenuProps) {
                             onClick={closeMenu}
                         />
                     </>
+                ) : isHelpVisible ? (
+                    <SelectionShortcutHelp
+                        selectedText={selectedText}
+                        bindings={bindings}
+                        configError={configError}
+                        onUpdateBinding={updateBinding}
+                        onResetBindings={resetBindings}
+                    />
                 ) : (
                     <div data-testid="inline-translation-window">
                         <SelectionTranslationCard
