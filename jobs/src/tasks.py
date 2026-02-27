@@ -15,10 +15,47 @@ from src.pdf_processor import process_pdf_file
 from src.celery_app import celery_app
 from src.s3_service import s3_service
 from src.utils import time_it
+from src.web_extract.orchestrator import WebDocumentExtractionOrchestrator
 
 logger = logging.getLogger(__name__)
 
 T = TypeVar('T')
+
+def _env_float(name: str, default: float) -> float:
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+    try:
+        return float(raw_value)
+    except ValueError:
+        logger.warning("Invalid %s=%r, falling back to %s", name, raw_value, default)
+        return default
+
+
+def _env_int(name: str, default: int) -> int:
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+    try:
+        return int(raw_value)
+    except ValueError:
+        logger.warning("Invalid %s=%r, falling back to %s", name, raw_value, default)
+        return default
+
+
+WEB_EXTRACTION_SCORE_THRESHOLD = _env_float("WEB_EXTRACTION_SCORE_THRESHOLD", 0.78)
+WEB_EXTRACTION_MIN_ACCEPTABLE_SCORE = _env_float(
+    "WEB_EXTRACTION_MIN_ACCEPTABLE_SCORE", 0.55
+)
+WEB_EXTRACTION_TIMEOUT_SECONDS = _env_int("WEB_EXTRACTION_TIMEOUT_SECONDS", 30)
+WEB_EXTRACTION_MAX_CHARS = _env_int("WEB_EXTRACTION_MAX_CHARS", 120000)
+
+web_document_orchestrator = WebDocumentExtractionOrchestrator(
+    acceptance_threshold=WEB_EXTRACTION_SCORE_THRESHOLD,
+    minimum_acceptable_score=WEB_EXTRACTION_MIN_ACCEPTABLE_SCORE,
+    timeout_seconds=WEB_EXTRACTION_TIMEOUT_SECONDS,
+    max_chars=WEB_EXTRACTION_MAX_CHARS,
+)
 
 def run_async_safely(coro: Coroutine[Any, Any, T]) -> T:
     """
@@ -259,6 +296,90 @@ def construct_data_table_task(
 
         # Re-raise the exception to mark task as failed in Celery
         raise exc
+
+
+@celery_app.task(bind=True, name="import_web_document")
+def import_web_document(
+    self,
+    url: str,
+    webhook_url: str,
+    project_id: str | None = None,
+) -> Dict[str, Any]:
+    """
+    Import and extract readable text from a web document URL and send results to webhook.
+    """
+    task_id = self.request.id
+
+    def write_to_status(new_status: str) -> None:
+        logger.info(f"Updating task {task_id} status: {new_status}")
+        try:
+            self.update_state(state="PROGRESS", meta={"status": new_status})
+        except Exception as exc:
+            logger.error(
+                f"Failed to update task {task_id} status: {exc}. New status: {new_status}"
+            )
+
+    try:
+        logger.info(f"Starting web import task {task_id} for url={url}")
+        write_to_status("Preparing extraction pipeline")
+
+        result = web_document_orchestrator.run(
+            url=url,
+            task_id=task_id,
+            project_id=project_id,
+            status_callback=write_to_status,
+        )
+
+        write_to_status("Content extracted")
+
+        webhook_payload = {
+            "task_id": task_id,
+            "status": "completed",
+            "result": result,
+            "error": None,
+        }
+
+        response = requests.post(
+            webhook_url,
+            json=webhook_payload,
+            timeout=60,
+            headers={"Content-Type": "application/json"},
+        )
+        response.raise_for_status()
+
+        logger.info(f"Web import task {task_id} completed successfully")
+        return {
+            "task_id": task_id,
+            "status": "completed",
+            "webhook_sent": True,
+        }
+    except Exception as exc:
+        logger.error(f"Web import task {task_id} failed: {exc}", exc_info=True)
+
+        failure_payload = {
+            "task_id": task_id,
+            "status": "failed",
+            "result": {
+                "success": False,
+                "url": url,
+                "project_id": project_id,
+                "error": str(exc),
+            },
+            "error": str(exc),
+        }
+        try:
+            requests.post(
+                webhook_url,
+                json=failure_payload,
+                timeout=60,
+                headers={"Content-Type": "application/json"},
+            ).raise_for_status()
+        except requests.RequestException as webhook_error:
+            logger.error(
+                f"Failed to send web import failure webhook for task {task_id}: {webhook_error}"
+            )
+
+        raise
 
 
 @celery_app.task(bind=True, name="health_check")

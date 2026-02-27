@@ -69,12 +69,12 @@ function UrlImportDialog({
                 <DialogHeader>
                     <DialogTitle>Import from URL</DialogTitle>
                     <DialogDescription>
-                        Enter the URL of the PDF you want to import.
+                        Enter the URL of a PDF or web article you want to import.
                     </DialogDescription>
                 </DialogHeader>
                 <div className="grid gap-4 py-4">
                     <Input
-                        placeholder="https://arxiv.org/pdf/..."
+                        placeholder="https://example.com/article or https://arxiv.org/pdf/..."
                         value={url}
                         onChange={e => setUrl(e.target.value)}
                         onKeyDown={e => e.key === "Enter" && handleSubmit()}

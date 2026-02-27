@@ -5,7 +5,7 @@ Webhook handlers for PDF processing service integration.
 import logging
 import uuid
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Optional
 
 from app.database.crud.conversation_crud import ConversationCreate, conversation_crud
 from app.database.crud.message_crud import MessageCreate, message_crud
@@ -29,6 +29,7 @@ from app.llm.citation_handler import CitationHandler
 from app.llm.operations import operations
 from app.schemas.responses import DataTableResult, PaperMetadataExtraction
 from app.schemas.user import CurrentUser
+from app.services.document_ingest_service import ingest_web_article_document
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -357,6 +358,134 @@ class DataTableProcessingResultWebhookData(BaseModel):
     status: str
     result: Optional[DataTableResult] = None
     error: Optional[str] = None
+
+
+class WebDocumentImportResult(BaseModel):
+    success: bool = True
+    url: str
+    canonical_url: Optional[str] = None
+    title: Optional[str] = None
+    content_format: Optional[str] = "text"
+    raw_content: Optional[str] = None
+    blocks: Optional[list[dict[str, Any]]] = None
+    quality_score: Optional[float] = None
+    quality_confidence: Optional[float] = None
+    strategy_used: Optional[str] = None
+    extraction_trace: Optional[list[dict[str, Any]]] = None
+    extraction_meta: Optional[dict[str, Any]] = None
+    content_sha256: Optional[str] = None
+    project_id: Optional[str] = None
+    error: Optional[str] = None
+    duration: Optional[float] = None
+
+
+class WebDocumentImportWebhookData(BaseModel):
+    task_id: str
+    status: str
+    result: Optional[WebDocumentImportResult] = None
+    error: Optional[str] = None
+
+
+@webhook_router.post("/document-import/{job_id}")
+async def handle_document_import_webhook(
+    job_id: str,
+    webhook_data: WebDocumentImportWebhookData,
+    db: Session = Depends(get_db),
+):
+    """Handle webhook from jobs service for web URL document imports."""
+    job = paper_upload_job_crud.get_by(db=db, task_id=webhook_data.task_id, id=job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    resolved_job_id = str(job.id)
+    if job.status == JobStatus.COMPLETED:
+        logger.warning(
+            "Received document import webhook for already completed job %s, ignoring",
+            resolved_job_id,
+        )
+        return {"status": "webhook ignored - job already completed"}
+
+    user = job.user
+    if not user:
+        logger.error("No user found for document import job %s", resolved_job_id)
+        raise HTTPException(status_code=500, detail="User not found for job")
+
+    job_user = CurrentUser(
+        id=user.id,
+        email=user.email,
+        name=user.name,
+        is_admin=user.is_admin,
+    )
+
+    status = webhook_data.status.lower()
+    result = webhook_data.result
+
+    try:
+        if status == "completed" and result and result.success:
+            if not result.raw_content:
+                raise ValueError("Missing raw_content in document import webhook result")
+
+            normalized_extraction_meta: dict[str, Any] = dict(result.extraction_meta or {})
+            if result.blocks:
+                normalized_extraction_meta["blocks"] = result.blocks
+            if result.quality_score is not None:
+                normalized_extraction_meta["quality_score"] = result.quality_score
+            if result.quality_confidence is not None:
+                normalized_extraction_meta["quality_confidence"] = result.quality_confidence
+            if result.strategy_used:
+                normalized_extraction_meta["strategy_used"] = result.strategy_used
+            if result.extraction_trace:
+                normalized_extraction_meta["extraction_trace"] = result.extraction_trace
+            if result.duration is not None:
+                normalized_extraction_meta["duration_seconds"] = result.duration
+
+            ingest_web_article_document(
+                job_id=resolved_job_id,
+                source_url=result.url,
+                title=result.title,
+                canonical_url=result.canonical_url,
+                content_format=result.content_format,
+                raw_content=result.raw_content,
+                extraction_meta=normalized_extraction_meta,
+                content_sha256=result.content_sha256,
+                current_user=job_user,
+                db=db,
+                project_id=result.project_id,
+            )
+            paper_upload_job_crud.mark_as_completed(
+                db=db,
+                job_id=resolved_job_id,
+                user=job_user,
+            )
+        else:
+            error_message = (
+                result.error if result and result.error else webhook_data.error or "Unknown error"
+            )
+            logger.error(
+                "Web document import failed for job %s: %s",
+                resolved_job_id,
+                error_message,
+            )
+            paper_upload_job_crud.mark_as_failed(
+                db=db,
+                job_id=resolved_job_id,
+                user=job_user,
+            )
+    except Exception as exc:
+        logger.error(
+            "Error processing document import webhook for job %s: %s",
+            resolved_job_id,
+            exc,
+            exc_info=True,
+        )
+        paper_upload_job_crud.mark_as_failed(
+            db=db,
+            job_id=resolved_job_id,
+            user=job_user,
+        )
+        raise HTTPException(status_code=500, detail="Error processing webhook") from exc
+
+    return {"status": "document import webhook processed"}
 
 
 @webhook_router.post("/data-table-processing/{job_id}")

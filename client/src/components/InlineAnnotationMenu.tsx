@@ -213,6 +213,10 @@ export default function InlineAnnotationMenu(props: InlineAnnotationMenuProps) {
     } = useSelectionTranslation(paperId);
 
     const closeMenu = useCallback(() => {
+        const domSelection = window.getSelection();
+        if (domSelection && domSelection.rangeCount > 0) {
+            domSelection.removeAllRanges();
+        }
         setSelectedText("");
         setTooltipPosition(null);
         setIsAnnotating(false);

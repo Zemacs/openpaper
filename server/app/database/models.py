@@ -373,11 +373,20 @@ class Paper(Base):
     # Define the GIN index for full-text search
     __table_args__ = (
         Index("ix_papers_ts_vector", "ts_vector", postgresql_using="gin"),
+        Index("ix_papers_user_id_canonical_url", "user_id", "canonical_url"),
+        Index("ix_papers_content_sha256", "content_sha256"),
     )
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     # we can change the default to TODO once we have some kind of bulk paper upload? for now, every upload automatically converts to reading
     status = Column(String, nullable=False, default=PaperStatus.reading)
+    source_type = Column(String, nullable=False, default="pdf")
+    source_url = Column(String, nullable=True)
+    canonical_url = Column(String, nullable=True)
+    content_format = Column(String, nullable=True)
+    content_sha256 = Column(String, nullable=True)
+    ingest_status = Column(String, nullable=False, default="completed")
+    extraction_meta = Column(JSONB, nullable=True)
     file_url = Column(String, nullable=False)
     preview_url = Column(String, nullable=True)
     s3_object_key = Column(String, nullable=True)
@@ -652,6 +661,7 @@ class Highlight(Base):
     page_number = Column(Integer, nullable=True)
 
     position = Column(JSONB, nullable=True)
+    anchor = Column(JSONB, nullable=True)
 
     # Role
     # This can be user for user-created highlights or assistant for AI-generated highlights
@@ -862,6 +872,8 @@ class TranslationUsageLog(Base):
     paper_id = Column(
         UUID(as_uuid=True), ForeignKey("papers.id", ondelete="CASCADE"), nullable=False
     )
+    selection_id = Column(String, nullable=True)
+    source_type = Column(String, nullable=True)
     mode = Column(String, nullable=False)
     source_chars = Column(Integer, nullable=False, default=0)
     context_chars = Column(Integer, nullable=False, default=0)

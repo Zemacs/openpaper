@@ -388,17 +388,21 @@ async def get_pdf(
         return JSONResponse(status_code=404, content={"message": "Document not found"})
 
     paper_data = paper.to_dict()
+    source_type = str(paper.source_type or "pdf")
+    is_web_article = source_type == "web_article"
 
-    signed_url = s3_service.get_cached_presigned_url(
-        db,
-        paper_id=str(paper.id),
-        object_key=str(paper.s3_object_key),
-        current_user=current_user,
-    )
-    if not signed_url:
-        return JSONResponse(status_code=404, content={"message": "File not found"})
+    signed_url = None
+    if not is_web_article:
+        signed_url = s3_service.get_cached_presigned_url(
+            db,
+            paper_id=str(paper.id),
+            object_key=str(paper.s3_object_key),
+            current_user=current_user,
+        )
+        if not signed_url:
+            return JSONResponse(status_code=404, content={"message": "File not found"})
 
-    should_check_doi = (not paper.doi) and (paper.title is not None)
+    should_check_doi = (not is_web_article) and (not paper.doi) and (paper.title is not None)
     is_cache_stale = (not paper.attempted_metadata_at) or (
         paper.attempted_metadata_at
         and (datetime.now(timezone.utc) - paper.attempted_metadata_at).days
@@ -419,7 +423,12 @@ async def get_pdf(
                 user=current_user,
             )
 
-        if paper.doi and (not paper.journal and not paper.publisher) and is_cache_stale:
+        if (
+            not is_web_article
+            and paper.doi
+            and (not paper.journal and not paper.publisher)
+            and is_cache_stale
+        ):
             enriched_data = get_enriched_data(str(paper.doi))
             if enriched_data:
                 paper_data["journal"] = enriched_data.journal
@@ -455,15 +464,26 @@ async def get_pdf(
     except Exception:
         logger.exception("Error updating enriched data for paper %s", id, exc_info=True)
 
-    paper_data["file_url"] = signed_url
+    paper_data["source_type"] = source_type
+    paper_data["viewer_type"] = "article" if is_web_article else "pdf"
+    paper_data["source_url"] = paper.source_url
+    paper_data["canonical_url"] = paper.canonical_url
+    paper_data["content_format"] = paper.content_format
+    paper_data["file_url"] = signed_url if not is_web_article else None
+    if is_web_article:
+        paper_data["raw_content"] = paper.raw_content
+
     paper_data["summary_citations"] = [  # type: ignore
         ResponseCitation.model_validate(citation).model_dump()
         for citation in paper.summary_citations or []
     ]
 
-    paper_data["summary"] = paper_crud.get_summary_replace_image_placeholders(
-        db, paper_id=id, current_user=current_user
-    )
+    if is_web_article:
+        paper_data["summary"] = paper.summary or ""
+    else:
+        paper_data["summary"] = paper_crud.get_summary_replace_image_placeholders(
+            db, paper_id=id, current_user=current_user
+        )
 
     paper_data["tags"] = [  # type: ignore
         {"id": str(t.id), "name": t.name, "color": t.color} for t in paper.tags  # type: ignore

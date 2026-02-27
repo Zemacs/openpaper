@@ -9,9 +9,28 @@ export interface ReferenceCitation {
     paper_id?: string;
 }
 
+export interface ArticleContentBlock {
+    id?: string;
+    type?: string;
+    text?: string;
+    image_url?: string;
+    caption?: string;
+    width?: number;
+    height?: number;
+    source?: string;
+}
+
+export interface PaperExtractionMeta {
+    blocks?: ArticleContentBlock[];
+    strategy_used?: string;
+    quality_score?: number;
+    quality_confidence?: number;
+    [key: string]: unknown;
+}
+
 export interface PaperData {
     filename: string;
-    file_url: string;
+    file_url?: string | null;
     authors: string[];
     title: string;
     abstract: string;
@@ -27,6 +46,13 @@ export interface PaperData {
     journal?: string;
     doi?: string;
     publisher?: string;
+    source_type?: string;
+    viewer_type?: "pdf" | "article";
+    source_url?: string | null;
+    canonical_url?: string | null;
+    content_format?: string | null;
+    raw_content?: string | null;
+    extraction_meta?: PaperExtractionMeta | null;
 }
 
 export interface SharedPaper {
@@ -88,6 +114,7 @@ export type TranslationMode = 'word' | 'term' | 'sentence' | 'formula';
 
 export interface TranslateSelectionRequest {
     paper_id: string;
+    selection_id?: string;
     selected_text: string;
     page_number?: number;
     selection_type_hint?: SelectionTypeHint;
@@ -154,6 +181,9 @@ export interface Citation {
     key: string;
     paper_id?: string;
     reference: string;
+    anchor?: string;
+    snippet_id?: number;
+    source_type?: string;
 }
 
 export interface Conversation {

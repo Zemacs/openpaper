@@ -11,6 +11,10 @@ from typing import AsyncGenerator, Literal, Optional, Sequence, Union
 import requests as http_requests
 from app.database.crud.paper_crud import paper_crud
 from app.database.models import Paper
+from app.llm.article_retrieval import (
+    build_article_snippet_block,
+    select_relevant_article_snippets,
+)
 from app.llm.base import BaseLLMClient
 from app.llm.citation_handler import CitationHandler
 from app.llm.json_parser import JSONParser
@@ -36,9 +40,78 @@ from app.database.crud.message_crud import message_crud
 from app.database.database import get_db
 from app.helpers.s3 import s3_service
 
+ARTICLE_EVIDENCE_REFERENCE_MAX_CHARS = max(
+    180, int(os.getenv("ARTICLE_EVIDENCE_REFERENCE_MAX_CHARS", "420"))
+)
+
 
 class PaperOperations(BaseLLMClient):
     """Operations related to paper analysis and chat functionality"""
+
+    @staticmethod
+    def _truncate_evidence_reference(text: str) -> str:
+        normalized = re.sub(r"\s+", " ", text or "").strip()
+        if len(normalized) <= ARTICLE_EVIDENCE_REFERENCE_MAX_CHARS:
+            return normalized
+        return f"{normalized[:ARTICLE_EVIDENCE_REFERENCE_MAX_CHARS].rstrip()}..."
+
+    @classmethod
+    def _normalize_article_evidence(
+        cls,
+        citations: list[dict],
+        snippet_map: dict[int, str],
+    ) -> list[dict]:
+        normalized: list[dict] = []
+        for citation in citations:
+            raw_key = citation.get("key")
+            snippet_id: int | None = None
+            try:
+                snippet_id = int(raw_key)
+            except (TypeError, ValueError):
+                snippet_id = None
+
+            if snippet_id is not None and snippet_id in snippet_map:
+                anchor_text = cls._truncate_evidence_reference(snippet_map[snippet_id])
+                normalized.append(
+                    {
+                        "key": snippet_id,
+                        "reference": anchor_text,
+                        "anchor": anchor_text,
+                        "snippet_id": snippet_id,
+                        "source_type": "web_article",
+                    }
+                )
+                continue
+
+            fallback_reference = cls._truncate_evidence_reference(
+                str(citation.get("reference", ""))
+            )
+            if not fallback_reference:
+                continue
+            normalized.append(
+                {
+                    "key": raw_key if raw_key is not None else len(normalized) + 1,
+                    "reference": fallback_reference,
+                    "anchor": fallback_reference,
+                    "source_type": "web_article",
+                }
+            )
+
+        if normalized:
+            return normalized
+
+        # If model failed to produce parseable evidence, fall back to first snippets.
+        fallback_items = sorted(snippet_map.items(), key=lambda item: item[0])[:3]
+        return [
+            {
+                "key": snippet_id,
+                "reference": cls._truncate_evidence_reference(snippet_text),
+                "anchor": cls._truncate_evidence_reference(snippet_text),
+                "snippet_id": snippet_id,
+                "source_type": "web_article",
+            }
+            for snippet_id, snippet_text in fallback_items
+        ]
 
     @retry_llm_operation(max_retries=3, delay=1.0)
     def create_narrative_summary(
@@ -178,37 +251,94 @@ class PaperOperations(BaseLLMClient):
         stream_no_text_timeout_seconds = max(
             10, int(os.getenv("LLM_STREAM_NO_TEXT_TIMEOUT_SECONDS", "45"))
         )
-
-        signed_url = s3_service.get_cached_presigned_url(
-            db,
-            paper_id=str(paper.id),
-            object_key=str(paper.s3_object_key),
-            current_user=current_user,
+        article_chunk_chars = max(
+            400, int(os.getenv("ARTICLE_CHAT_RETRIEVAL_CHUNK_CHARS", "900"))
+        )
+        article_overlap_chars = max(
+            0, int(os.getenv("ARTICLE_CHAT_RETRIEVAL_OVERLAP_CHARS", "140"))
+        )
+        article_top_k = max(
+            3, int(os.getenv("ARTICLE_CHAT_RETRIEVAL_TOP_K", "8"))
+        )
+        article_max_context_chars = max(
+            2500, int(os.getenv("ARTICLE_CHAT_RETRIEVAL_MAX_CONTEXT_CHARS", "7000"))
         )
 
-        if not signed_url:
-            raise ValueError(
-                f"Could not generate presigned URL for paper with ID {paper_id}."
+        message_content = [TextContent(text=formatted_prompt)]
+        stream_file: FileContent | None = None
+        article_snippet_map: dict[int, str] = {}
+
+        is_web_article = str(paper.source_type or "").lower() == "web_article"
+        if is_web_article or not paper.s3_object_key:
+            raw_content = (paper.raw_content or "").strip()
+            if not raw_content:
+                raise ValueError(
+                    "No readable article content found for this document."
+                )
+
+            conversation_texts = [
+                str(message.content or "")
+                for message in conversation_history
+                if getattr(message, "content", None)
+            ]
+            article_snippets = select_relevant_article_snippets(
+                raw_content,
+                query=question,
+                conversation_messages=conversation_texts,
+                user_references=list(user_references or []),
+                chunk_chars=article_chunk_chars,
+                overlap_chars=article_overlap_chars,
+                top_k=article_top_k,
+                max_total_chars=article_max_context_chars,
+            )
+            article_snippet_map = {
+                int(snippet.snippet_id): str(snippet.text)
+                for snippet in article_snippets
+            }
+            snippet_block = build_article_snippet_block(article_snippets)
+            retrieval_instructions = (
+                "Use ONLY the snippets below as evidence for your answer.\n"
+                "When producing the ---EVIDENCE--- block, @cite[n] must map to [SNIPPET n].\n"
+                "Do not cite content that is not present in the snippets.\n"
+                "If the snippets are insufficient, explicitly say: 论文未明确给出。"
+            )
+            message_content = [
+                TextContent(
+                    text=(
+                        f"{formatted_prompt}\n\n"
+                        f"{retrieval_instructions}\n\n"
+                        f"{snippet_block}"
+                    )
+                ),
+            ]
+        else:
+            signed_url = s3_service.get_cached_presigned_url(
+                db,
+                paper_id=str(paper.id),
+                object_key=str(paper.s3_object_key),
+                current_user=current_user,
             )
 
-        # Retrieve PDF bytes off the event loop to avoid blocking
-        response = await asyncio.to_thread(
-            partial(http_requests.get, signed_url, timeout=60)
-        )
-        response.raise_for_status()
-        pdf_bytes = response.content
+            if not signed_url:
+                raise ValueError(
+                    f"Could not generate presigned URL for paper with ID {paper_id}."
+                )
 
-        message_content = [
-            TextContent(text=formatted_prompt),
-        ]
+            # Retrieve PDF bytes off the event loop to avoid blocking
+            response = await asyncio.to_thread(
+                partial(http_requests.get, signed_url, timeout=60)
+            )
+            response.raise_for_status()
+            pdf_bytes = response.content
+
+            stream_file = FileContent(
+                data=pdf_bytes,
+                mime_type="application/pdf",
+                filename=f"{paper.title or 'paper'}.pdf",
+            )
 
         stream_queue: asyncio.Queue[object] = asyncio.Queue()
         stream_done = object()
-        stream_file = FileContent(
-            data=pdf_bytes,
-            mime_type="application/pdf",
-            filename=f"{paper.title or 'paper'}.pdf",
-        )
 
         async def stream_reader() -> None:
             sentinel = object()
@@ -303,6 +433,11 @@ class PaperOperations(BaseLLMClient):
                     structured_evidence = CitationHandler.parse_evidence_block(
                         evidence_part
                     )
+                    if article_snippet_map:
+                        structured_evidence = self._normalize_article_evidence(
+                            citations=structured_evidence,
+                            snippet_map=article_snippet_map,
+                        )
 
                     # Yield both raw and structured evidence
                     yield {

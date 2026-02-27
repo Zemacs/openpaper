@@ -1,6 +1,7 @@
 'use client';
 
 import { PdfHighlighterViewer, RenderedHighlightPosition } from '@/components/PdfHighlighterViewer';
+import { ArticleReader } from '@/components/ArticleReader';
 import { Button } from '@/components/ui/button';
 import { fetchFromApi } from '@/lib/api';
 import { useParams, useRouter, useSearchParams } from 'next/navigation';
@@ -186,6 +187,7 @@ export default function PaperView() {
     const [isDragging, setIsDragging] = useState(false);
     const isMobile = useIsMobile();
     const [mobileView, setMobileView] = useState<'reader' | 'panel'>('reader');
+    const isArticleViewer = paperData?.viewer_type === 'article' || paperData?.source_type === 'web_article';
 
     if (isMobile) {
         toolset.nav = toolset.nav.filter(tool => tool.name !== 'Focus');
@@ -318,7 +320,8 @@ export default function PaperView() {
 
         const refValueElement = document.getElementById(`citation-ref-${key}-${messageIndex}`);
         if (refValueElement) {
-            triggerCitationSearch(refValueElement.innerText);
+            const anchorText = (refValueElement as HTMLElement).dataset.citationAnchor || refValueElement.innerText;
+            triggerCitationSearch(anchorText);
         }
 
         scheduleCitationUiReset();
@@ -531,7 +534,28 @@ export default function PaperView() {
                 <div className="flex-grow overflow-auto min-h-0">
                     {mobileView === 'reader' ? (
                         <div className="w-full h-full">
-                            {paperData.file_url && (
+                            {isArticleViewer ? (
+                                <ArticleReader
+                                    paperId={id}
+                                    title={paperData.title}
+                                    rawContent={paperData.raw_content}
+                                    contentFormat={paperData.content_format}
+                                    articleBlocks={paperData.extraction_meta?.blocks}
+                                    sourceUrl={paperData.canonical_url || paperData.source_url}
+                                    explicitSearchTerm={explicitSearchTerm}
+                                    selectedText={selectedText}
+                                    setSelectedText={setSelectedText}
+                                    tooltipPosition={tooltipPosition}
+                                    setTooltipPosition={setTooltipPosition}
+                                    setIsAnnotating={setIsAnnotating}
+                                    activeHighlight={activeHighlight}
+                                    addHighlight={(text, doAnnotate) => {
+                                        void addHighlight(text, undefined, undefined, doAnnotate);
+                                    }}
+                                    removeHighlight={removeHighlight}
+                                    setUserMessageReferences={setUserMessageReferences}
+                                />
+                            ) : paperData.file_url && (
                                 <PdfHighlighterViewer
                                     paperId={id}
                                     pdfUrl={paperData.file_url}
@@ -615,7 +639,28 @@ export default function PaperView() {
                         width: rightSideFunction === 'Focus' ? '100%' : `${leftPanelWidth}%`
                     }}
                 >
-                    {paperData.file_url && (
+                    {isArticleViewer ? (
+                        <ArticleReader
+                            paperId={id}
+                            title={paperData.title}
+                            rawContent={paperData.raw_content}
+                            contentFormat={paperData.content_format}
+                            articleBlocks={paperData.extraction_meta?.blocks}
+                            sourceUrl={paperData.canonical_url || paperData.source_url}
+                            explicitSearchTerm={explicitSearchTerm}
+                            selectedText={selectedText}
+                            setSelectedText={setSelectedText}
+                            tooltipPosition={tooltipPosition}
+                            setTooltipPosition={setTooltipPosition}
+                            setIsAnnotating={setIsAnnotating}
+                            activeHighlight={activeHighlight}
+                            addHighlight={(text, doAnnotate) => {
+                                void addHighlight(text, undefined, undefined, doAnnotate);
+                            }}
+                            removeHighlight={removeHighlight}
+                            setUserMessageReferences={setUserMessageReferences}
+                        />
+                    ) : paperData.file_url && (
                         <div className="w-full h-full">
                             <PdfHighlighterViewer
                                 paperId={id}

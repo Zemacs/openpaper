@@ -35,6 +35,18 @@ const fetchPdfAsFile = async (url: string): Promise<File> => {
     return new File([blob], filename, { type: 'application/pdf' });
 }
 
+const inferUrlSourceType = (url: string): "pdf_url" | "web_url" => {
+    try {
+        const parsed = new URL(url);
+        if (parsed.pathname.toLowerCase().endsWith(".pdf")) {
+            return "pdf_url";
+        }
+    } catch {
+        // Let the backend validate malformed URLs.
+    }
+    return "web_url";
+}
+
 /**
  * Uploads a single file, optionally associating it with a project.
  */
@@ -73,26 +85,33 @@ export const uploadFiles = async (files: File[]): Promise<MinimalJob[]> => {
 }
 
 export const uploadFromUrl = async (url: string, projectId?: string): Promise<MinimalJob> => {
-    const body = projectId
-        ? { url, project_id: projectId }
-        : { url };
+    const body = {
+        source_type: inferUrlSourceType(url),
+        url,
+        project_id: projectId,
+    };
 
-    const res: PdfUploadResponse = await fetchFromApi("/api/paper/upload/from-url", {
+    const res = await fetchFromApi("/api/document/import", {
         method: "POST",
         body: JSON.stringify(body),
         headers: {
             "Content-Type": "application/json",
         },
-    })
+    }) as PdfUploadResponse & { job_id: string };
     const fileName = res.file_name || url
     return { jobId: res.job_id, fileName: fileName }
 }
 
 /**
- * Uploads a PDF from a URL, first attempting client-side fetch for better filename handling,
+ * Uploads a document from a URL, first attempting client-side fetch for better filename handling
+ * when the URL points to a PDF,
  * then falling back to server-side fetch if that fails.
  */
 export const uploadFromUrlWithFallback = async (url: string, projectId?: string): Promise<MinimalJob> => {
+    if (inferUrlSourceType(url) === "web_url") {
+        return uploadFromUrl(url, projectId);
+    }
+
     try {
         const file = await fetchPdfAsFile(url);
         return await uploadFile(file, projectId);

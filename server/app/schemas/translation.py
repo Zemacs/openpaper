@@ -23,6 +23,7 @@ class TranslateSelectionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     paper_id: str
+    selection_id: Optional[str] = None
     selected_text: str = Field(min_length=1)
     page_number: Optional[int] = None
     selection_type_hint: SelectionTypeHint = SelectionTypeHint.AUTO

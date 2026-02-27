@@ -317,3 +317,14 @@
 	border-radius: 2px;
 	pointer-events: none;
 }
+
+/* Article reader uses custom selection overlays; suppress native full-line selection paint. */
+.article-selection-scope ::selection {
+	background: transparent;
+	color: inherit;
+}
+
+.article-selection-scope ::-moz-selection {
+	background: transparent;
+	color: inherit;
+}

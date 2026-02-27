@@ -35,6 +35,7 @@ from app.helpers.subscription_limits import (
     can_user_access_knowledge_base,
     can_user_upload_paper,
 )
+from app.helpers.url_safety import validate_public_http_url
 from app.schemas.user import CurrentUser
 from dotenv import load_dotenv
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Request, UploadFile
@@ -147,9 +148,12 @@ async def upload_pdf_from_url(
 
     # Validate the URL and fetch PDF content
     url = str(request.url)
+    try:
+        validate_public_http_url(url)
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"message": str(exc)})
+
     is_valid, pdf_bytes, error_message = await validate_url_and_fetch_pdf(url)
-    if not is_valid:
-        return JSONResponse(status_code=400, content={"message": error_message})
 
     # Create the paper upload job
     paper_upload_job_obj = PaperUploadJobCreate(
@@ -170,24 +174,78 @@ async def upload_pdf_from_url(
 
     casted_project_id = UUID(str(project_id)) if project_id else None
 
-    # Get filename from URL
-    filename = url.split("/")[-1]
+    if is_valid:
+        # Get filename from URL
+        filename = url.split("/")[-1] or "document.pdf"
 
-    # Pass file contents and filename instead of the UploadFile object
-    background_tasks.add_task(
-        upload_raw_file_microservice,
-        file_contents=pdf_bytes,
-        filename=filename,
-        paper_upload_job=paper_upload_job,
-        current_user=current_user,
-        db=db,
-        project_id=casted_project_id,
-    )
+        # Pass file contents and filename instead of the UploadFile object
+        background_tasks.add_task(
+            upload_raw_file_microservice,
+            file_contents=pdf_bytes,
+            filename=filename,
+            paper_upload_job=paper_upload_job,
+            current_user=current_user,
+            db=db,
+            project_id=casted_project_id,
+        )
+        message = "File upload started"
+    else:
+        logger.info(
+            "URL %s did not validate as PDF (%s); falling back to web article import.",
+            url,
+            error_message,
+        )
+        running_job = paper_upload_job_crud.mark_as_running(
+            db=db,
+            job_id=str(paper_upload_job.id),
+            user=current_user,
+        )
+        if not running_job:
+            paper_upload_job_crud.mark_as_failed(
+                db=db,
+                job_id=str(paper_upload_job.id),
+                user=current_user,
+            )
+            return JSONResponse(
+                status_code=500,
+                content={"message": "Failed to initialize web import job"},
+            )
+        try:
+            task_id = jobs_client.submit_web_document_import_job(
+                url=url,
+                job_id=str(paper_upload_job.id),
+                project_id=project_id,
+            )
+            paper_upload_job_crud.update(
+                db=db,
+                db_obj=running_job,
+                obj_in=PaperUploadJobUpdate(task_id=task_id),
+                user=current_user,
+            )
+        except Exception as exc:
+            logger.error(
+                "Failed to submit web import job %s: %s",
+                paper_upload_job.id,
+                exc,
+                exc_info=True,
+            )
+            paper_upload_job_crud.mark_as_failed(
+                db=db,
+                job_id=str(paper_upload_job.id),
+                user=current_user,
+            )
+            return JSONResponse(
+                status_code=502,
+                content={
+                    "message": "Failed to submit web import job to background queue",
+                },
+            )
+        message = "Web document import started"
 
     return JSONResponse(
         status_code=202,
         content={
-            "message": "File upload started",
+            "message": message,
             "job_id": str(paper_upload_job.id),
         },
     )

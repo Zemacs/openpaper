@@ -108,6 +108,7 @@ async def translate_selection(
                 db=db,
                 current_user=current_user,
                 paper_id=request.paper_id,
+                selection_id=request.selection_id,
                 selected_text=selected_text,
                 page_number=request.page_number,
                 selection_type_hint=request.selection_type_hint,

@@ -1,15 +1,16 @@
 import logging
 import os
 
-from firecrawl import FirecrawlApp
-
 logger = logging.getLogger(__name__)
 
-FIRECRAWL_API_KEY = os.getenv("FIRECRAWL_API_KEY")
-if not FIRECRAWL_API_KEY:
-    raise ValueError("FIRECRAWL_API_KEY environment variable is not set.")
+def _build_firecrawl_app():
+    api_key = (os.getenv("FIRECRAWL_API_KEY") or "").strip()
+    if not api_key:
+        return None
 
-firecrawl_app = FirecrawlApp(api_key=FIRECRAWL_API_KEY)
+    from firecrawl import FirecrawlApp
+
+    return FirecrawlApp(api_key=api_key)
 
 
 def scrape_web_page(url: str) -> str:
@@ -23,6 +24,10 @@ def scrape_web_page(url: str) -> str:
         str: The scraped content of the web page.
     """
     try:
+        firecrawl_app = _build_firecrawl_app()
+        if firecrawl_app is None:
+            raise ValueError("FIRECRAWL_API_KEY environment variable is not set.")
+
         response = firecrawl_app.scrape_url(url, formats=["markdown"])
         if not response.error and response.markdown:
             return response.markdown

@@ -199,6 +199,55 @@ class JobsClient:
                 f"Failed to submit data table processing job: {error_msg}"
             ) from e
 
+    def submit_web_document_import_job(
+        self,
+        *,
+        url: str,
+        job_id: str,
+        project_id: Optional[str] = None,
+    ) -> str:
+        """
+        Submit a web document import job to the jobs service.
+
+        Args:
+            url: Public URL to import
+            job_id: Internal PaperUploadJob ID
+            project_id: Optional project association
+
+        Returns:
+            str: Celery task ID
+        """
+        if not isinstance(url, str) or not url.strip():
+            raise ValueError("url must be a non-empty string")
+
+        try:
+            celery_app = Celery("openpaper_tasks", broker=self.celery_broker_url)
+            celery_app.conf.update(
+                broker_connection_retry_on_startup=True,
+                broker_connection_retry=True,
+                broker_connection_max_retries=3,
+                task_serializer="json",
+                accept_content=["json"],
+                result_serializer="json",
+                task_always_eager=False,
+            )
+
+            webhook_url = f"{self.webhook_base_url}/api/webhooks/document-import/{job_id}"
+            kwargs: Dict[str, Any] = {"url": url, "webhook_url": webhook_url}
+            if project_id:
+                kwargs["project_id"] = str(project_id)
+
+            task = celery_app.send_task(
+                "import_web_document",
+                kwargs=kwargs,
+            )
+            return str(task.id)
+        except Exception as e:
+            error_msg = str(e)
+            raise Exception(
+                f"Failed to submit web document import job: {error_msg}"
+            ) from e
+
     def check_celery_task_status(self, task_id: str) -> Dict[str, Any]:
         """
         Check the status of a Celery task using the HTTP API.

@@ -56,9 +56,11 @@ function buildRequestBody(
     paperId: string,
     payload: TranslateSelectionInput,
     selectedText: string,
+    selectionId: string,
 ): TranslateSelectionRequest {
     return {
         paper_id: paperId,
+        selection_id: selectionId,
         selected_text: selectedText,
         page_number: payload.pageNumber,
         selection_type_hint: payload.selectionTypeHint || "auto",
@@ -200,7 +202,12 @@ export function useSelectionTranslation(paperId?: string) {
                 controller.abort();
             }, TRANSLATION_TIMEOUT_MS);
 
-            const requestBody = buildRequestBody(paperId, normalizedPayload, selectedText);
+            const requestBody = buildRequestBody(
+                paperId,
+                normalizedPayload,
+                selectedText,
+                fingerprint,
+            );
             const requestPromise = (async () => {
                 try {
                     const response = await fetchSelectionTranslation(requestBody, controller.signal);
@@ -226,10 +233,8 @@ export function useSelectionTranslation(paperId?: string) {
                     return null;
                 } finally {
                     window.clearTimeout(timeoutId);
-                    if (inFlightPromiseRef.current === requestPromise) {
-                        inFlightPromiseRef.current = null;
-                    }
                     if (inFlightFingerprintRef.current === fingerprint) {
+                        inFlightPromiseRef.current = null;
                         inFlightFingerprintRef.current = null;
                     }
                     if (abortControllerRef.current === controller) {

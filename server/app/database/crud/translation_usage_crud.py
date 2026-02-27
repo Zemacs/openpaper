@@ -13,6 +13,8 @@ from sqlalchemy.orm import Session
 class TranslationUsageBase(BaseModel):
     user_id: UUID
     paper_id: UUID
+    selection_id: Optional[str] = None
+    source_type: Optional[str] = None
     mode: str
     source_chars: int = 0
     context_chars: int = 0
@@ -43,6 +45,8 @@ class TranslationUsageCRUD(
         context_chars: int,
         output_chars: int,
         cached: bool,
+        selection_id: Optional[str] = None,
+        source_type: Optional[str] = None,
     ) -> Optional[TranslationUsageLog]:
         total_chars = max(0, source_chars) + max(0, context_chars) + max(0, output_chars)
         credits_used = max(0, int(total_chars / 5))
@@ -50,6 +54,8 @@ class TranslationUsageCRUD(
         payload = TranslationUsageCreate(
             user_id=user.id,
             paper_id=paper_id,
+            selection_id=selection_id,
+            source_type=source_type,
             mode=mode,
             source_chars=max(0, source_chars),
             context_chars=max(0, context_chars),

@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 
 function mockWordResponse() {
     return {
@@ -53,6 +53,11 @@ function mockSentenceResponse() {
     };
 }
 
+async function gotoSelectionHarness(page: Page) {
+    await page.goto("/translation-e2e", { waitUntil: "load", timeout: 60000 });
+    await expect(page.getByTestId("translation-e2e-title")).toBeVisible();
+}
+
 test("selection stays silent until shortcut is pressed", async ({ page }) => {
     let translateCalls = 0;
     await page.route("**/api/translate/selection", async (route) => {
@@ -64,7 +69,7 @@ test("selection stays silent until shortcut is pressed", async ({ page }) => {
         });
     });
 
-    await page.goto("/translation-e2e");
+    await gotoSelectionHarness(page);
     await page.waitForTimeout(400);
 
     await expect(page.getByTestId("inline-annotation-menu")).toHaveCount(0);
@@ -82,7 +87,7 @@ test("shortcut f triggers translation panel", async ({ page }) => {
         });
     });
 
-    await page.goto("/translation-e2e");
+    await gotoSelectionHarness(page);
     await page.keyboard.press("f");
 
     const card = page.getByTestId("selection-translation-card");
@@ -102,7 +107,7 @@ test("shortcut ? opens help and custom bindings take effect", async ({ page }) =
         });
     });
 
-    await page.goto("/translation-e2e");
+    await gotoSelectionHarness(page);
 
     await page.keyboard.press("?");
     await expect(page.getByTestId("selection-shortcut-help")).toBeVisible();
@@ -122,7 +127,7 @@ test("shortcut ? opens help and custom bindings take effect", async ({ page }) =
 });
 
 test("shortcut c adds chat reference and exits selection", async ({ page }) => {
-    await page.goto("/translation-e2e");
+    await gotoSelectionHarness(page);
 
     await page.keyboard.press("c");
 
@@ -131,7 +136,7 @@ test("shortcut c adds chat reference and exits selection", async ({ page }) => {
 });
 
 test("shortcut e creates highlight and exits selection", async ({ page }) => {
-    await page.goto("/translation-e2e");
+    await gotoSelectionHarness(page);
 
     await page.keyboard.press("e");
 
@@ -140,7 +145,7 @@ test("shortcut e creates highlight and exits selection", async ({ page }) => {
 });
 
 test("shortcut n enters annotate flow", async ({ page }) => {
-    await page.goto("/translation-e2e");
+    await gotoSelectionHarness(page);
 
     await page.keyboard.press("n");
 
@@ -159,7 +164,7 @@ test("selection shortcuts are blocked during drag", async ({ page }) => {
         });
     });
 
-    await page.goto("/translation-e2e");
+    await gotoSelectionHarness(page);
 
     await page.getByTestId("translation-e2e-start-drag").click({ force: true });
     await expect(page.getByTestId("translation-e2e-selection-progress")).toContainText("yes");
@@ -189,7 +194,7 @@ test("long selection is trimmed to request limit when translating", async ({ pag
         });
     });
 
-    await page.goto("/translation-e2e");
+    await gotoSelectionHarness(page);
     await page.getByTestId("translation-e2e-long-case").click();
     await page.keyboard.press("f");
 
@@ -200,7 +205,7 @@ test("long selection is trimmed to request limit when translating", async ({ pag
 });
 
 test("escape dismisses selected state", async ({ page }) => {
-    await page.goto("/translation-e2e");
+    await gotoSelectionHarness(page);
 
     await page.keyboard.press("Escape");
 

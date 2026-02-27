@@ -2,7 +2,7 @@ import logging
 import re
 import uuid
 from datetime import datetime
-from typing import List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
 from app.database.crud.annotation_crud import AnnotationCreate, annotation_crud
 from app.database.crud.base_crud import CRUDBase
@@ -30,6 +30,13 @@ logger = logging.getLogger(__name__)
 
 # Define Pydantic models for type safety
 class PaperBase(BaseModel):
+    source_type: Optional[str] = None
+    source_url: Optional[str] = None
+    canonical_url: Optional[str] = None
+    content_format: Optional[str] = None
+    content_sha256: Optional[str] = None
+    ingest_status: Optional[str] = None
+    extraction_meta: Optional[dict[str, Any]] = None
     file_url: Optional[str] = None
     s3_object_key: Optional[str] = None
     authors: Optional[List[str]] = None

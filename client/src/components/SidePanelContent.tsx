@@ -622,7 +622,7 @@ export function SidePanelContent({
             let references: Reference | undefined = undefined;
 
             for (let attempt = 1; attempt <= maxStreamAttempts; attempt++) {
-                let requestTimeout: ReturnType<typeof window.setTimeout> | null = null;
+                let requestTimeout: number | null = null;
                 try {
                     if (attempt > 1) {
                         setStreamingChunks([]);
@@ -655,7 +655,7 @@ export function SidePanelContent({
                     references = undefined;
 
                     while (true) {
-                        let readTimeout: ReturnType<typeof window.setTimeout> | null = null;
+                        let readTimeout: number | null = null;
                         const readPromise = reader.read();
                         const readTimeoutPromise = new Promise<never>((_, reject) => {
                             readTimeout = window.setTimeout(() => {
@@ -943,6 +943,9 @@ export function SidePanelContent({
                                             </div>
                                             <div
                                                 id={`citation-ref-${value.key}-${index}`}
+                                                data-citation-anchor={value.anchor || value.reference}
+                                                data-citation-source-type={value.source_type || ""}
+                                                data-citation-snippet-id={value.snippet_id ?? ""}
                                                 className={`text-xs ${msg.role === 'user'
                                                     ? 'bg-blue-200 text-blue-800 line-clamp-1'
                                                     : 'text-secondary-foreground'

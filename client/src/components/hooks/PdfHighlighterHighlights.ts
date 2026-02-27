@@ -32,14 +32,9 @@ export function useHighlighterHighlights(
 				}
 			);
 
-			// Filter valid highlights - require either position or offsets
-			const validHighlights = data.filter(
-				(h) =>
-					h.raw_text &&
-					(h.position ||
-						(typeof h.start_offset === "number" &&
-							typeof h.end_offset === "number"))
-			);
+			// Keep all highlights that contain text. Some viewers (e.g. web articles)
+			// intentionally persist highlights without PDF position data.
+			const validHighlights = data.filter((h) => h.raw_text);
 
 			// Deduplicate
 			const deduplicatedHighlights = validHighlights.filter(
@@ -124,15 +119,10 @@ export function useHighlighterHighlights(
 			doAnnotate?: boolean,
 			color?: HighlightColor
 		) => {
-			if (!position) {
-				console.error("Position is required for highlights");
-				return;
-			}
-
 			const newHighlight: Omit<PaperHighlight, "id"> = {
 				raw_text: selectedText,
 				role: "user",
-				page_number: pageNumber || position.boundingRect.pageNumber,
+				page_number: pageNumber || position?.boundingRect?.pageNumber,
 				position: position,
 				color: color,
 			};

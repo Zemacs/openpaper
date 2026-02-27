@@ -534,6 +534,7 @@ class TranslationOperations:
         db: Session,
         current_user: CurrentUser,
         paper_id: str,
+        selection_id: Optional[str],
         selected_text: str,
         page_number: Optional[int],
         selection_type_hint: SelectionTypeHint,
@@ -639,6 +640,8 @@ class TranslationOperations:
                     json.dumps(validated_output.model_dump(), ensure_ascii=False)
                 ),
                 cached=False,
+                selection_id=selection_id,
+                source_type=str(paper.source_type or "pdf"),
             )
         except Exception as usage_error:
             logger.warning(f"Failed to record translation usage: {usage_error}")

@@ -6,6 +6,11 @@ function streamBody(chunks: Array<{ type: string; content: unknown }>) {
     return chunks.map((chunk) => JSON.stringify(chunk)).join("END_OF_STREAM") + "END_OF_STREAM";
 }
 
+async function gotoChatHarness(page: Page) {
+    await page.goto("/chat-e2e", { waitUntil: "load", timeout: 60000 });
+    await expect(page.getByTestId("starter-question-1")).toBeVisible({ timeout: 10000 });
+}
+
 async function mockCommonSessionEndpoints(page: Page) {
     await page.route("**/api/auth/me", async (route) => {
         await route.fulfill({
@@ -101,10 +106,8 @@ test("creates conversation when none exists and sends starter prompt", async ({ 
         });
     });
 
-    await page.goto("/chat-e2e");
-
+    await gotoChatHarness(page);
     const starter = page.getByTestId("starter-question-1");
-    await expect(starter).toBeVisible({ timeout: 10000 });
     await starter.click();
 
     await expect(page.getByText("这是会话初始化后的回答。")).toBeVisible();
@@ -165,10 +168,8 @@ test("retries stream when provider is busy and eventually succeeds", async ({ pa
         });
     });
 
-    await page.goto("/chat-e2e");
-
+    await gotoChatHarness(page);
     const starter = page.getByTestId("starter-question-1");
-    await expect(starter).toBeVisible({ timeout: 10000 });
     await starter.click();
 
     await expect(page.getByText("忙时重试成功返回结果。")).toBeVisible();
@@ -217,10 +218,8 @@ test("stops retry loop and shows recoverable error when provider remains busy", 
         });
     });
 
-    await page.goto("/chat-e2e");
-
+    await gotoChatHarness(page);
     const starter = page.getByTestId("starter-question-1");
-    await expect(starter).toBeVisible({ timeout: 10000 });
     await starter.click();
 
     await expect(page.getByTestId("chat-stream-error")).toBeVisible();
