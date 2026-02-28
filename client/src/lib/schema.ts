@@ -9,15 +9,51 @@ export interface ReferenceCitation {
     paper_id?: string;
 }
 
+export interface ArticleTableCell {
+    text?: string;
+    inline_markdown?: string;
+    inline_runs?: ArticleInlineRun[];
+    is_header?: boolean;
+    colspan?: number;
+    rowspan?: number;
+    scope?: string;
+}
+
+export interface ArticleBlockLink {
+    href?: string;
+    label?: string;
+    kind?: string;
+}
+
+export interface ArticleInlineRun {
+    type?: string;
+    text?: string;
+    href?: string;
+    children?: ArticleInlineRun[];
+}
+
 export interface ArticleContentBlock {
     id?: string;
     type?: string;
     text?: string;
+    inline_markdown?: string;
+    inline_runs?: ArticleInlineRun[];
+    anchor_id?: string;
     image_url?: string;
     caption?: string;
+    equation_tex?: string;
+    equation_number?: string;
+    ordered?: boolean;
+    items?: string[];
+    columns?: string[];
+    rows?: string[][];
+    header_rows?: ArticleTableCell[][];
+    body_rows?: ArticleTableCell[][];
+    notes?: string[];
     width?: number;
     height?: number;
     source?: string;
+    links?: ArticleBlockLink[];
 }
 
 export interface PaperExtractionMeta {
