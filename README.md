@@ -1,3 +1,8 @@
+> [!IMPORTANT]
+> Repository status: legacy / reference-only.
+> Active development has moved to [ai-native-workbench](https://github.com/Zemacs/ai-native-workbench).
+> Use that repository for all new implementation work. This repository remains available as historical source material for migration and capability extraction.
+
 # ![Open Paper](https://raw.githubusercontent.com/sabaimran/openpaper/refs/heads/master/client/src/app/openpaper.svg) Open Paper
 
 
