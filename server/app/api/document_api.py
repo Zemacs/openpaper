@@ -30,6 +30,7 @@ from app.schemas.document import (
 )
 from app.schemas.user import CurrentUser
 from app.services.document_ingest_service import create_document_upload_job
+from app.services.document_import_planner import resolve_document_import_plan
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlalchemy.orm import Session
 
@@ -60,6 +61,40 @@ def _filename_from_url(url: str) -> str:
     return candidate
 
 
+def _recover_completed_import_paper(
+    *,
+    db: Session,
+    current_user: CurrentUser,
+    upload_job,
+):
+    if not upload_job.task_id or str(upload_job.status) != JobStatus.COMPLETED.value:
+        return None
+
+    celery_status = jobs_client.check_celery_task_status(str(upload_job.task_id))
+    if celery_status.get("status") != "success":
+        return None
+
+    task_result = celery_status.get("result") or {}
+    canonical_url = str(task_result.get("canonical_url") or "").strip()
+    if canonical_url:
+        recovered_paper = paper_crud.get_by_canonical_url(
+            db=db,
+            canonical_url=canonical_url,
+            user=current_user,
+        )
+        if recovered_paper:
+            return recovered_paper
+
+    fallback_url = str(task_result.get("source_url") or "").strip()
+    if fallback_url:
+        return paper_crud.get_by_canonical_url(
+            db=db,
+            canonical_url=fallback_url,
+            user=current_user,
+        )
+    return None
+
+
 @document_router.post("/import", response_model=DocumentImportResponse, status_code=202)
 async def import_document(
     request: DocumentImportRequest,
@@ -79,10 +114,26 @@ async def import_document(
         validate_public_http_url(url)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    import_plan = await resolve_document_import_plan(
+        requested_source_type=request.source_type,
+        url=url,
+    )
+    resolved_source_type = import_plan.resolved_source_type
+    resolved_url = import_plan.resolved_url
+    if resolved_source_type != request.source_type or resolved_url != url:
+        logger.info(
+            "Resolved document import plan request=%s resolved=%s resolver=%s url=%s resolved_url=%s",
+            request.source_type.value,
+            resolved_source_type.value,
+            import_plan.resolver,
+            url,
+            resolved_url,
+        )
     upload_job = None
 
-    if request.source_type == DocumentImportSourceType.PDF_URL:
-        is_valid, pdf_bytes, validation_error = await validate_url_and_fetch_pdf(url)
+    if resolved_source_type == DocumentImportSourceType.PDF_URL:
+        is_valid, pdf_bytes, validation_error = await validate_url_and_fetch_pdf(resolved_url)
         if not is_valid:
             raise HTTPException(status_code=400, detail=validation_error)
 
@@ -91,13 +142,13 @@ async def import_document(
         background_tasks.add_task(
             upload_raw_file_microservice,
             file_contents=pdf_bytes,
-            filename=_filename_from_url(url),
+            filename=_filename_from_url(resolved_url),
             paper_upload_job=upload_job,
             current_user=current_user,
             db=db,
             project_id=project_uuid,
         )
-    elif request.source_type == DocumentImportSourceType.WEB_URL:
+    elif resolved_source_type == DocumentImportSourceType.WEB_URL:
         upload_job = create_document_upload_job(db, current_user)
         running_job = paper_upload_job_crud.mark_as_running(
             db=db,
@@ -113,7 +164,7 @@ async def import_document(
             raise HTTPException(status_code=500, detail="Failed to initialize import job.")
         try:
             task_id = jobs_client.submit_web_document_import_job(
-                url=url,
+                url=resolved_url,
                 job_id=str(upload_job.id),
                 project_id=request.project_id,
             )
@@ -148,7 +199,7 @@ async def import_document(
     return DocumentImportResponse(
         job_id=str(upload_job.id),
         status=JobStatus.PENDING.value,
-        source_type=request.source_type,
+        source_type=resolved_source_type,
     )
 
 
@@ -168,6 +219,12 @@ async def get_document_import_status(
     paper = paper_crud.get_by_upload_job_id(
         db=db, upload_job_id=str(upload_job.id), user=current_user
     )
+    if not paper:
+        paper = _recover_completed_import_paper(
+            db=db,
+            current_user=current_user,
+            upload_job=upload_job,
+        )
 
     source_type = str(paper.source_type) if paper and paper.source_type else None
 

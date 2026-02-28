@@ -252,6 +252,23 @@ class PaperCRUD(CRUDBase["Paper", PaperCreate, PaperUpdate]):
             .first()
         )
 
+    def get_by_canonical_url(
+        self, db: Session, *, canonical_url: str, user: CurrentUser
+    ) -> Optional[Paper]:
+        """Get the most recently updated paper by canonical URL."""
+        normalized_canonical_url = str(canonical_url or "").strip()
+        if not normalized_canonical_url:
+            return None
+        return (
+            db.query(Paper)
+            .filter(
+                Paper.canonical_url == normalized_canonical_url,
+                Paper.user_id == user.id,
+            )
+            .order_by(Paper.updated_at.desc())
+            .first()
+        )
+
     def get_total_paper_count(self, db: Session, *, user: CurrentUser) -> int:
         """
         Get the total number of papers uploaded by a user.

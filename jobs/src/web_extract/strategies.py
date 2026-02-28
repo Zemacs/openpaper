@@ -7,7 +7,12 @@ from urllib.parse import urlparse
 import requests
 
 from src.web_extract.adapter_registry import get_adapter_for_host
-from src.web_extract.fetcher import fetch_page, is_probably_blocked_page
+from src.web_extract.arxiv_html_blocks import extract_arxiv_structured_content
+from src.web_extract.fetcher import (
+    fetch_page,
+    is_binary_content_type,
+    is_probably_blocked_page,
+)
 from src.web_extract.html_utils import (
     JSONLD_SCRIPT_REGEX,
     build_reader_blocks,
@@ -48,6 +53,15 @@ X_STATUS_HOSTS = {
     "mobile.x.com",
     "mobile.twitter.com",
 }
+
+_ARXIV_HOST_SUFFIX = "arxiv.org"
+_ARXIV_HTML_PATH_REGEX = re.compile(r"/html/", flags=re.IGNORECASE)
+
+
+def _is_arxiv_url(url: str) -> bool:
+    parsed = urlparse(url)
+    host = (parsed.netloc or "").lower().strip()
+    return host == _ARXIV_HOST_SUFFIX or host.endswith(f".{_ARXIV_HOST_SUFFIX}")
 
 
 def _extract_image_url_from_media_entity(media_entity: dict[str, Any]) -> str | None:
@@ -530,7 +544,7 @@ class DomainAdapterStrategy(ExtractorStrategy):
         canonical_url = extract_canonical_url(payload, page.final_url or context.url)
         return ExtractionCandidate(
             strategy_name=self.name,
-            url=context.url,
+            url=canonical_url,
             canonical_url=canonical_url,
             title=title,
             content_format="text",
@@ -542,6 +556,57 @@ class DomainAdapterStrategy(ExtractorStrategy):
                 "content_type": page.content_type,
             },
             blocks=build_reader_blocks(raw_content),
+        )
+
+
+class ArxivHtmlStrategy(ExtractorStrategy):
+    name = "arxiv_html"
+
+    def extract(self, context: ExtractionContext) -> ExtractionCandidate:
+        if not _is_arxiv_url(context.url):
+            raise ValueError("URL is not an arXiv host.")
+
+        page = self._get_page(context)
+        final_url = page.final_url or context.url
+        parsed = urlparse(final_url)
+        if not _is_arxiv_url(final_url):
+            raise ValueError("URL is not an arXiv host.")
+        if not _ARXIV_HTML_PATH_REGEX.search(parsed.path or ""):
+            raise ValueError("URL is not an arXiv HTML document path.")
+        if is_binary_content_type(page.content_type):
+            raise ValueError("arXiv URL returned binary content instead of HTML.")
+
+        payload = page.payload or ""
+        if "<html" not in payload.lower():
+            raise ValueError("arXiv HTML payload is empty or malformed.")
+
+        structured_content = extract_arxiv_structured_content(
+            page_html=payload,
+            base_url=final_url,
+            max_chars=context.max_chars,
+        )
+        raw_content = structured_content.raw_content
+        if len(raw_content) < 120:
+            raise ValueError("arXiv HTML extraction produced insufficient readable content.")
+
+        title = extract_title(payload)
+        canonical_url = extract_canonical_url(payload, final_url)
+        blocks = structured_content.blocks or build_reader_blocks(raw_content)
+
+        return ExtractionCandidate(
+            strategy_name=self.name,
+            url=canonical_url,
+            canonical_url=canonical_url,
+            title=title,
+            content_format="text",
+            raw_content=raw_content[: context.max_chars],
+            extraction_meta={
+                "method": "arxiv_html",
+                "host": parsed.netloc.lower(),
+                "content_type": page.content_type,
+                "block_counts": structured_content.block_counts,
+            },
+            blocks=blocks,
         )
 
 
@@ -634,6 +699,9 @@ class HttpReadabilityStrategy(ExtractorStrategy):
         page = self._get_page(context)
         payload = page.payload or ""
         content_type = page.content_type or ""
+
+        if is_binary_content_type(content_type):
+            raise ValueError("Binary payload cannot be extracted as readable article text.")
 
         if is_probably_blocked_page(payload, content_type):
             raise ValueError("Page appears to be blocked by anti-bot protections.")

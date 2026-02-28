@@ -2,10 +2,12 @@ import unittest
 from unittest.mock import patch
 
 from src.web_extract.llm_adaptive import AdaptiveRule, apply_rule
-from src.web_extract.models import ExtractionCandidate, ExtractionContext
+from src.web_extract.models import ExtractionCandidate, ExtractionContext, FetchedPage
 from src.web_extract.orchestrator import WebDocumentExtractionOrchestrator
 from src.web_extract.scoring import score_candidate
 from src.web_extract.strategies import (
+    ArxivHtmlStrategy,
+    HttpReadabilityStrategy,
     XStatusApiStrategy,
     _build_candidate_from_fxtwitter,
     _build_candidate_from_vxtwitter,
@@ -193,6 +195,41 @@ class WebExtractTests(unittest.TestCase):
             (None, "2026911299494449635"),
         )
 
+    def test_arxiv_strategy_normalizes_unversioned_html_to_versioned_canonical(self) -> None:
+        html_payload = """
+        <html>
+          <head><title>Sample arXiv Paper</title></head>
+          <body>
+            <nav><a href="/html/2602.09024v1">HTML version</a></nav>
+            <article class="ltx_document">
+              <h1 class="ltx_title">Sample arXiv Paper</h1>
+              <div class="ltx_para">
+                This paragraph is intentionally long enough to pass the minimum content checks
+                for arXiv extraction and verify that canonical URL normalization does not
+                interfere with structured article parsing in the reader pipeline.
+              </div>
+            </article>
+          </body>
+        </html>
+        """
+        context = ExtractionContext(
+            url="https://arxiv.org/html/2602.09024",
+            fetched_page=FetchedPage(
+                requested_url="https://arxiv.org/html/2602.09024",
+                final_url="https://arxiv.org/html/2602.09024",
+                content_type="text/html; charset=utf-8",
+                payload=html_payload,
+                status_code=200,
+            ),
+            max_chars=4000,
+        )
+
+        candidate = ArxivHtmlStrategy().extract(context)
+
+        self.assertEqual(candidate.url, "https://arxiv.org/html/2602.09024v1")
+        self.assertEqual(candidate.canonical_url, "https://arxiv.org/html/2602.09024v1")
+        self.assertIn("structured article parsing", candidate.raw_content)
+
     def test_fxtwitter_builder_skips_truncated_preview_when_blocks_exist(self) -> None:
         payload = {
             "tweet": {
@@ -325,6 +362,113 @@ class WebExtractTests(unittest.TestCase):
             candidate.blocks[0].get("image_url"),
             "https://pbs.twimg.com/media/vx-cover.jpg",
         )
+
+    @patch("src.web_extract.strategies.fetch_page")
+    def test_arxiv_html_strategy_extracts_structured_blocks(self, mock_fetch_page) -> None:
+        html_payload = """
+        <html>
+          <head>
+            <title>Attention Is All You Need</title>
+            <link rel="canonical" href="https://arxiv.org/html/1706.03762v7" />
+          </head>
+          <body>
+            <article class="ltx_document">
+              <h1 class="ltx_title ltx_title_document">Attention Is All You Need</h1>
+              <div class="ltx_para">
+                Transformer architectures rely on self-attention for sequence modeling and this paragraph
+                is intentionally verbose to satisfy minimum content quality checks for extraction.
+              </div>
+              <table class="ltx_equation ltx_eqn_table" id="Eq1">
+                <tr>
+                  <td>
+                    <math alttext="E = mc^2" display="block">
+                      <annotation encoding="application/x-tex">E = mc^2</annotation>
+                    </math>
+                  </td>
+                  <td><span class="ltx_tag_equation">(1)</span></td>
+                </tr>
+              </table>
+              <ul>
+                <li>Multi-head attention enables richer interaction patterns.</li>
+                <li>Positional encoding injects sequence order information.</li>
+              </ul>
+              <table class="ltx_tabular">
+                <thead>
+                  <tr><th rowspan="2">Metric Group</th><th colspan="2">Value</th></tr>
+                  <tr><th>Primary</th><th>Secondary</th></tr>
+                </thead>
+                <tbody>
+                  <tr><th scope="row">BLEU</th><td>28.4</td><td>31.2</td></tr>
+                  <tr><th scope="row">Latency</th><td>12ms</td><td>11ms</td></tr>
+                </tbody>
+                <tfoot>
+                  <tr><td colspan="3">Note: measured on A100.</td></tr>
+                </tfoot>
+              </table>
+              <figure>
+                <img src="/html/1706.03762v7/x1.png" />
+                <figcaption>Model architecture overview.</figcaption>
+              </figure>
+            </article>
+          </body>
+        </html>
+        """
+        mock_fetch_page.return_value = FetchedPage(
+            requested_url="https://arxiv.org/html/1706.03762v7",
+            final_url="https://arxiv.org/html/1706.03762v7",
+            content_type="text/html; charset=utf-8",
+            payload=html_payload,
+            status_code=200,
+            headers={"content-type": "text/html; charset=utf-8"},
+        )
+
+        strategy = ArxivHtmlStrategy()
+        candidate = strategy.extract(
+            ExtractionContext(url="https://arxiv.org/html/1706.03762v7", max_chars=20000)
+        )
+
+        self.assertEqual(candidate.strategy_name, "arxiv_html")
+        self.assertIn("self-attention", candidate.raw_content.lower())
+        block_types = {str(block.get("type")) for block in candidate.blocks}
+        self.assertIn("equation", block_types)
+        self.assertIn("list", block_types)
+        self.assertIn("table", block_types)
+        equations = [block for block in candidate.blocks if block.get("type") == "equation"]
+        self.assertGreaterEqual(len(equations), 1)
+        self.assertEqual(str(equations[0].get("equation_tex")), "E = mc^2")
+        self.assertEqual(str(equations[0].get("equation_number")), "(1)")
+        image_blocks = [block for block in candidate.blocks if block.get("type") == "image"]
+        self.assertGreaterEqual(len(image_blocks), 1)
+        self.assertEqual(
+            image_blocks[0].get("image_url"),
+            "https://arxiv.org/html/1706.03762v7/x1.png",
+        )
+        block_counts = candidate.extraction_meta.get("block_counts", {})
+        self.assertGreaterEqual(int(block_counts.get("equation", 0)), 1)
+        self.assertGreaterEqual(int(block_counts.get("table", 0)), 1)
+        tables = [block for block in candidate.blocks if block.get("type") == "table"]
+        self.assertGreaterEqual(len(tables), 1)
+        header_rows = tables[0].get("header_rows") or []
+        self.assertGreaterEqual(len(header_rows), 1)
+        self.assertEqual(header_rows[0][0].get("rowspan"), 2)
+        self.assertEqual(header_rows[0][1].get("colspan"), 2)
+
+    @patch("src.web_extract.strategies.fetch_page")
+    def test_http_readability_rejects_binary_payload(self, mock_fetch_page) -> None:
+        mock_fetch_page.return_value = FetchedPage(
+            requested_url="https://example.com/report.pdf",
+            final_url="https://example.com/report.pdf",
+            content_type="application/pdf",
+            payload="",
+            status_code=200,
+            headers={"content-type": "application/pdf"},
+        )
+
+        strategy = HttpReadabilityStrategy()
+        with self.assertRaisesRegex(ValueError, "Binary payload"):
+            strategy.extract(
+                ExtractionContext(url="https://example.com/report.pdf", max_chars=20000)
+            )
 
 
 if __name__ == "__main__":

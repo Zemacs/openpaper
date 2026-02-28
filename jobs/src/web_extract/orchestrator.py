@@ -10,6 +10,7 @@ from src.web_extract.models import (
 from src.web_extract.safety import validate_public_http_url
 from src.web_extract.scoring import score_candidate
 from src.web_extract.strategies import (
+    ArxivHtmlStrategy,
     DomainAdapterStrategy,
     ExtractorStrategy,
     HttpReadabilityStrategy,
@@ -35,6 +36,7 @@ class WebDocumentExtractionOrchestrator:
         self.max_chars = max_chars
         self.strategies = strategies or [
             XStatusApiStrategy(),
+            ArxivHtmlStrategy(),
             DomainAdapterStrategy(),
             JsonLdStrategy(),
             HttpReadabilityStrategy(),

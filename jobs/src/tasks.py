@@ -352,6 +352,8 @@ def import_web_document(
             "task_id": task_id,
             "status": "completed",
             "webhook_sent": True,
+            "canonical_url": result.get("canonical_url"),
+            "source_url": result.get("url"),
         }
     except Exception as exc:
         logger.error(f"Web import task {task_id} failed: {exc}", exc_info=True)

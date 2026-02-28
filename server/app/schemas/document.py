@@ -6,6 +6,7 @@ from pydantic import BaseModel, ConfigDict, Field, HttpUrl
 
 
 class DocumentImportSourceType(str, Enum):
+    AUTO_URL = "auto_url"
     PDF_URL = "pdf_url"
     WEB_URL = "web_url"
 

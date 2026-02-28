@@ -1,5 +1,6 @@
 import html
 import re
+from urllib.parse import urljoin, urlparse, urlunparse
 
 TITLE_REGEX = re.compile(r"<title[^>]*>(.*?)</title>", flags=re.IGNORECASE | re.DOTALL)
 CANONICAL_REGEX = re.compile(
@@ -16,6 +17,12 @@ ARTICLE_CONTAINER_REGEX = re.compile(
 )
 BODY_REGEX = re.compile(r"<body[^>]*>(.*?)</body>", flags=re.IGNORECASE | re.DOTALL)
 PARAGRAPH_REGEX = re.compile(r"<p[^>]*>.*?</p>", flags=re.IGNORECASE | re.DOTALL)
+ARXIV_HTML_PATH_REGEX = re.compile(r"^/html/(?P<identifier>[^/?#]+)$", flags=re.IGNORECASE)
+ARXIV_HTML_REFERENCE_REGEX = re.compile(
+    r"/html/(?P<identifier>[^\"'\\s<>?#]+)",
+    flags=re.IGNORECASE,
+)
+ARXIV_VERSION_SUFFIX_REGEX = re.compile(r"v\d+$", flags=re.IGNORECASE)
 
 
 def normalize_whitespace(text: str) -> str:
@@ -49,12 +56,70 @@ def extract_title(page_html: str) -> str | None:
     return value or None
 
 
+def _resolve_url_without_fragment(url: str, fallback_url: str) -> str:
+    base_url = fallback_url.strip() or url.strip()
+    resolved_url = urljoin(base_url, url.strip() or fallback_url)
+    parsed = urlparse(resolved_url)
+    return urlunparse(
+        (
+            parsed.scheme,
+            parsed.netloc,
+            parsed.path,
+            parsed.params,
+            parsed.query,
+            "",
+        )
+    )
+
+
+def _normalize_arxiv_canonical_url(page_html: str, fallback_url: str) -> str:
+    parsed = urlparse(fallback_url)
+    host = (parsed.netloc or "").lower().strip()
+    if host != "arxiv.org" and not host.endswith(".arxiv.org"):
+        return fallback_url
+
+    path_match = ARXIV_HTML_PATH_REGEX.match(parsed.path or "")
+    if not path_match:
+        return fallback_url
+
+    current_identifier = (path_match.group("identifier") or "").strip()
+    if not current_identifier:
+        return fallback_url
+
+    if ARXIV_VERSION_SUFFIX_REGEX.search(current_identifier):
+        return urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", "", ""))
+
+    current_base_identifier = ARXIV_VERSION_SUFFIX_REGEX.sub("", current_identifier)
+    for match in ARXIV_HTML_REFERENCE_REGEX.finditer(page_html or ""):
+        candidate_identifier = (match.group("identifier") or "").strip()
+        if not candidate_identifier:
+            continue
+        if ARXIV_VERSION_SUFFIX_REGEX.sub("", candidate_identifier) != current_base_identifier:
+            continue
+        if not ARXIV_VERSION_SUFFIX_REGEX.search(candidate_identifier):
+            continue
+        return urlunparse(
+            (
+                parsed.scheme,
+                parsed.netloc,
+                f"/html/{candidate_identifier}",
+                "",
+                "",
+                "",
+            )
+        )
+
+    return fallback_url
+
+
 def extract_canonical_url(page_html: str, fallback_url: str) -> str:
     match = CANONICAL_REGEX.search(page_html or "")
-    if not match:
-        return fallback_url
-    value = (match.group(1) or "").strip()
-    return value or fallback_url
+    if match:
+        value = (match.group(1) or "").strip()
+        resolved_url = _resolve_url_without_fragment(value or fallback_url, fallback_url)
+    else:
+        resolved_url = _resolve_url_without_fragment(fallback_url, fallback_url)
+    return _normalize_arxiv_canonical_url(page_html, resolved_url)
 
 
 def strip_html_to_text(page_html: str) -> str:

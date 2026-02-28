@@ -24,6 +24,23 @@ FALLBACK_HEADERS = {
     "Accept-Language": "en;q=0.8",
 }
 
+BINARY_CONTENT_TYPE_MARKERS = (
+    "application/pdf",
+    "application/octet-stream",
+    "application/zip",
+    "application/x-zip",
+    "application/x-gzip",
+    "application/gzip",
+    "image/",
+    "audio/",
+    "video/",
+)
+
+
+def is_binary_content_type(content_type: Optional[str]) -> bool:
+    lowered = (content_type or "").lower()
+    return any(marker in lowered for marker in BINARY_CONTENT_TYPE_MARKERS)
+
 
 def fetch_page(url: str, timeout_seconds: int = 30) -> FetchedPage:
     errors: list[str] = []
@@ -38,11 +55,18 @@ def fetch_page(url: str, timeout_seconds: int = 30) -> FetchedPage:
                 allow_redirects=True,
             )
             response.raise_for_status()
+            content_type = (response.headers.get("content-type") or "").lower()
+            payload_bytes = response.content or b""
+            is_pdf_payload = payload_bytes.startswith(b"%PDF-")
+            if is_pdf_payload and "application/pdf" not in content_type:
+                content_type = "application/pdf"
+
+            payload = "" if (is_pdf_payload or is_binary_content_type(content_type)) else response.text
             return FetchedPage(
                 requested_url=url,
                 final_url=str(response.url or url),
-                content_type=(response.headers.get("content-type") or "").lower(),
-                payload=response.text,
+                content_type=content_type,
+                payload=payload,
                 status_code=response.status_code,
                 headers={k.lower(): v for k, v in response.headers.items()},
             )
