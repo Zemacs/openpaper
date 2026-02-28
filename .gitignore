@@ -23,6 +23,7 @@ client/coverage
 client/.next/
 client/.next-e2e/
 client/.next.bad.*/
+client/.next.broken.*/
 client/out/
 client/public/blog-latest.json
 client/test-results/
@@ -36,6 +37,8 @@ ecs-task-definitions/
 # misc
 .DS_Store
 *.pem
+.runlogs/
+jobs/.state/
 
 # debug
 npm-debug.log*
